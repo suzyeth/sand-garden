@@ -2,6 +2,7 @@ import { useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { useStore } from '../sim/store';
+import { STONES } from '../sim/stones';
 
 /**
  * Fireflies — small emissive dots that appear only at night. Each
@@ -15,6 +16,11 @@ import { useStore } from '../sim/store';
  */
 
 const FIREFLY_COUNT = 5;
+// First N fireflies are residents — always present at night. The rest
+// are visitors with their own arrive-stay-leave schedule independent
+// of the day/night gate, so the count visible at any given moment
+// varies between 2 (no visitors active) and 5 (all visitors active).
+const FIREFLY_RESIDENTS = 2;
 const FLY_RADIUS = 6.5; // wander zone around the sand centre
 const FLY_HEIGHT_MIN = 0.4;
 const FLY_HEIGHT_MAX = 2.4;
@@ -151,21 +157,43 @@ export function Fireflies() {
     vy: number;
     nextDecisionIn: number; // seconds until next behavior pick
     turnRate: number; // rad/s applied to heading this segment
+    // perch sub-state — if non-null the firefly is locked to a stone
+    // top and ignores the wander behaviour until perchTimeLeft elapses.
+    perchTarget: [number, number, number] | null;
+    perchTimeLeft: number;
+    // visitor lifecycle — residents stay 'visible' forever. Visitors
+    // toggle between 'absent' (off-scene) and 'visible' on their own
+    // schedule, fading via visitFade for smooth in/out.
+    isResident: boolean;
+    visitMode: 'absent' | 'visible';
+    visitTimer: number;
+    visitFade: number;
   };
 
   const yMid = (FLY_HEIGHT_MIN + FLY_HEIGHT_MAX) / 2;
   const states = useMemo<FlyState[]>(
     () =>
-      specs.map((s, i) => ({
-        x: s.baseX,
-        y: yMid + (hash(i * 17.3) - 0.5) * 0.8,
-        z: s.baseZ,
-        heading: hash(i * 23.7) * Math.PI * 2,
-        speed: 0.18 + hash(i * 31.1) * 0.2,
-        vy: 0,
-        nextDecisionIn: 0.3 + hash(i * 41.7) * 0.8,
-        turnRate: (hash(i * 53.1) - 0.5) * 0.4,
-      })),
+      specs.map((s, i) => {
+        const isResident = i < FIREFLY_RESIDENTS;
+        return {
+          x: s.baseX,
+          y: yMid + (hash(i * 17.3) - 0.5) * 0.8,
+          z: s.baseZ,
+          heading: hash(i * 23.7) * Math.PI * 2,
+          speed: 0.18 + hash(i * 31.1) * 0.2,
+          vy: 0,
+          nextDecisionIn: 0.3 + hash(i * 41.7) * 0.8,
+          turnRate: (hash(i * 53.1) - 0.5) * 0.4,
+          perchTarget: null,
+          perchTimeLeft: 0,
+          isResident,
+          // Visitors start absent with a random offset so they don't
+          // all arrive simultaneously.
+          visitMode: isResident ? 'visible' : 'absent',
+          visitTimer: isResident ? 0 : 5 + hash(i * 61.3) * 35,
+          visitFade: isResident ? 1 : 0,
+        };
+      }),
     [specs, yMid],
   );
 
@@ -181,7 +209,42 @@ export function Fireflies() {
       const halo = haloRefs.current[i];
       const haloMat = haloMatRefs.current[i];
       if (!m || !mat || !body || !halo || !haloMat) continue;
-      if (w <= 0.001) {
+
+      const s = specs[i];
+      const st = states[i];
+
+      // ----- visitor schedule ----------------------------------------
+      if (!st.isResident) {
+        st.visitTimer -= dt;
+        if (st.visitTimer <= 0) {
+          if (st.visitMode === 'absent') {
+            // Arrive: spawn at the outer edge with heading toward the
+            // garden centre, then run the normal wander logic.
+            const ang = Math.random() * Math.PI * 2;
+            const r = FLY_RADIUS * 1.05;
+            st.x = Math.cos(ang) * r;
+            st.z = Math.sin(ang) * r;
+            st.y = yMid + (Math.random() - 0.5) * 0.6;
+            st.heading = Math.atan2(-st.z, -st.x);
+            st.speed = 0.25 + Math.random() * 0.15;
+            st.turnRate = (Math.random() - 0.5) * 0.4;
+            st.perchTarget = null;
+            st.visitMode = 'visible';
+            st.visitTimer = 22 + Math.random() * 28; // visible 22-50s
+          } else {
+            st.visitMode = 'absent';
+            st.visitTimer = 28 + Math.random() * 55; // hidden 28-83s
+          }
+        }
+        const fadeTarget = st.visitMode === 'visible' ? 1 : 0;
+        const fadeRate = 1 - Math.exp(-0.9 * dt); // ~3s ease
+        st.visitFade += (fadeTarget - st.visitFade) * fadeRate;
+      }
+
+      // Combined weight: nightWeight × visitFade. Residents stay at 1.
+      const finalW = w * st.visitFade;
+
+      if (finalW <= 0.001) {
         if (m.visible) m.visible = false;
         if (body.visible) body.visible = false;
         if (halo.visible) halo.visible = false;
@@ -191,70 +254,153 @@ export function Fireflies() {
       body.visible = true;
       halo.visible = true;
 
-      const s = specs[i];
-      const st = states[i];
       const time = elapsed.current;
 
-      // --- behavior FSM ticked at decision boundaries --------------
-      st.nextDecisionIn -= dt;
-      if (st.nextDecisionIn <= 0) {
-        const r = Math.random();
-        if (r < 0.28) {
-          // hover: near stand-still, light wobble
-          st.speed = 0.02 + Math.random() * 0.06;
-          st.turnRate = (Math.random() - 0.5) * 0.6;
-          st.nextDecisionIn = 0.5 + Math.random() * 1.2;
-        } else if (r < 0.5) {
-          // sharp turn: brief moment with high angular velocity
-          st.speed = 0.1 + Math.random() * 0.1;
-          st.turnRate = (Math.random() < 0.5 ? -1 : 1) * (1.8 + Math.random() * 1.8);
-          st.nextDecisionIn = 0.18 + Math.random() * 0.25;
-        } else if (r < 0.62) {
-          // dart: brief burst forward
-          st.speed = 0.55 + Math.random() * 0.4;
-          st.turnRate = (Math.random() - 0.5) * 0.5;
-          st.nextDecisionIn = 0.25 + Math.random() * 0.35;
+      // --- perch sub-state — fly toward stone, land, hold, take off
+      // The firefly retains real locomotion (heading-based flight)
+      // while approaching the target; only when it's within landing
+      // range does position get clamped to the perch point. This
+      // replaces the previous teleport-style lerp which read as
+      // unnatural warping.
+      if (st.perchTarget) {
+        const [tx, ty, tz] = st.perchTarget;
+        const dx = tx - st.x;
+        const dz = tz - st.z;
+        const horizDist = Math.hypot(dx, dz);
+
+        // "Landed" test combines horizontal AND vertical proximity so
+        // we never lock to the stone while the firefly is still in
+        // the air. Both must be true before we count down the timer.
+        const landed = horizDist < 0.035 && Math.abs(st.y - ty) < 0.025;
+
+        if (landed) {
+          // HOLD — locked on the perch, tick down the dwell timer.
+          st.x = tx;
+          st.y = ty;
+          st.z = tz;
+          st.speed = 0;
+          st.vy = 0;
+          st.perchTimeLeft -= dt;
+          if (st.perchTimeLeft <= 0) {
+            // TAKEOFF — small upward kick, random heading, drift speed.
+            st.perchTarget = null;
+            st.vy = 0.45;
+            st.speed = 0.25;
+            st.heading = Math.random() * Math.PI * 2;
+            st.turnRate = (Math.random() - 0.5) * 0.8;
+            st.nextDecisionIn = 0.3 + Math.random() * 0.6;
+          }
         } else {
-          // drift: easy cruise, gentle meander
-          st.speed = 0.18 + Math.random() * 0.18;
-          st.turnRate = (Math.random() - 0.5) * 0.5;
-          st.nextDecisionIn = 0.6 + Math.random() * 1.4;
+          // APPROACH + DESCEND — fly toward the stone, holding cruise
+          // altitude above it until the last ~30cm, then descend as
+          // we close in. No hard threshold, so the landing reads as
+          // a continuous deceleration arc instead of a snap.
+          const targetHeading = Math.atan2(dz, dx);
+          let dh = targetHeading - st.heading;
+          while (dh > Math.PI) dh -= Math.PI * 2;
+          while (dh < -Math.PI) dh += Math.PI * 2;
+          // Slower heading correction so the approach curves in like
+          // a real insect, not a guided missile.
+          st.heading += dh * Math.min(1, 3.5 * dt);
+
+          // Speed: scales linearly with horizDist down to ~5cm/s at
+          // very close range. Caps at 0.5 m/s for the cruise.
+          st.speed = THREE.MathUtils.clamp(horizDist * 1.3, 0.05, 0.50);
+          const vx = Math.cos(st.heading) * st.speed;
+          const vz = Math.sin(st.heading) * st.speed;
+          st.x += vx * dt;
+          st.z += vz * dt;
+
+          // Dynamic Y target — when far the firefly cruises ~15cm
+          // above the stone; in the last 30cm it descends. The
+          // descent finishes naturally as approachT → 0.
+          const approachT = THREE.MathUtils.clamp(
+            (horizDist - 0.08) / 0.3,
+            0,
+            1,
+          );
+          const dynamicTargetY = ty + 0.15 * approachT;
+          // Y easing slows down as we get close — fast catch-up while
+          // cruising, gentle settle as we descend onto the stone.
+          const yRate = 1.6 + (1 - approachT) * 1.4;
+          const yEase = 1 - Math.exp(-yRate * dt);
+          st.y += (dynamicTargetY - st.y) * yEase;
+          st.vy = 0;
+          // Don't tick down perchTimeLeft until actually landed.
+        }
+      } else {
+        // --- behavior FSM ticked at decision boundaries --------------
+        st.nextDecisionIn -= dt;
+        if (st.nextDecisionIn <= 0) {
+          const r = Math.random();
+          if (r < 0.07) {
+            // perch: pick a random stone, fly there & sit for 1.8-4.5s
+            const stone = STONES[Math.floor(Math.random() * STONES.length)];
+            const perchY = stone.scale[1] * 1.5 + 0.025;
+            st.perchTarget = [stone.pos[0], perchY, stone.pos[1]];
+            st.perchTimeLeft = 1.8 + Math.random() * 2.7;
+            st.nextDecisionIn = 0.1;
+          } else if (r < 0.32) {
+            // hover: near stand-still, light wobble
+            st.speed = 0.02 + Math.random() * 0.06;
+            st.turnRate = (Math.random() - 0.5) * 0.6;
+            st.nextDecisionIn = 0.5 + Math.random() * 1.2;
+          } else if (r < 0.5) {
+            // sharp turn: brief moment with high angular velocity
+            st.speed = 0.1 + Math.random() * 0.1;
+            st.turnRate = (Math.random() < 0.5 ? -1 : 1) * (1.8 + Math.random() * 1.8);
+            st.nextDecisionIn = 0.18 + Math.random() * 0.25;
+          } else if (r < 0.62) {
+            // dart: brief burst forward
+            st.speed = 0.55 + Math.random() * 0.4;
+            st.turnRate = (Math.random() - 0.5) * 0.5;
+            st.nextDecisionIn = 0.25 + Math.random() * 0.35;
+          } else {
+            // drift: easy cruise, gentle meander
+            st.speed = 0.18 + Math.random() * 0.18;
+            st.turnRate = (Math.random() - 0.5) * 0.5;
+            st.nextDecisionIn = 0.6 + Math.random() * 1.4;
+          }
         }
       }
 
       // --- continuous update ---------------------------------------
-      // Tiny per-frame heading noise so even straight cruises wobble
-      // a bit instead of looking laser-guided.
-      const headingNoise = (Math.random() - 0.5) * 1.4 * dt;
-      st.heading += st.turnRate * dt + headingNoise;
+      // Skipped while perched — perch sub-state writes position
+      // directly each frame.
+      if (!st.perchTarget) {
+        // Tiny per-frame heading noise so even straight cruises wobble
+        // a bit instead of looking laser-guided.
+        const headingNoise = (Math.random() - 0.5) * 1.4 * dt;
+        st.heading += st.turnRate * dt + headingNoise;
 
-      const vx = Math.cos(st.heading) * st.speed;
-      const vz = Math.sin(st.heading) * st.speed;
-      st.x += vx * dt;
-      st.z += vz * dt;
+        const vx = Math.cos(st.heading) * st.speed;
+        const vz = Math.sin(st.heading) * st.speed;
+        st.x += vx * dt;
+        st.z += vz * dt;
 
-      // Softly pull back when wandering past the radius.
-      const distSq = st.x * st.x + st.z * st.z;
-      const limit = FLY_RADIUS;
-      if (distSq > limit * limit) {
-        const toCentre = Math.atan2(-st.z, -st.x);
-        let delta = toCentre - st.heading;
-        while (delta > Math.PI) delta -= Math.PI * 2;
-        while (delta < -Math.PI) delta += Math.PI * 2;
-        st.heading += delta * dt * 2.2;
-      }
+        // Softly pull back when wandering past the radius.
+        const distSq = st.x * st.x + st.z * st.z;
+        const limit = FLY_RADIUS;
+        if (distSq > limit * limit) {
+          const toCentre = Math.atan2(-st.z, -st.x);
+          let delta = toCentre - st.heading;
+          while (delta > Math.PI) delta -= Math.PI * 2;
+          while (delta < -Math.PI) delta += Math.PI * 2;
+          st.heading += delta * dt * 2.2;
+        }
 
-      // Vertical: spring toward mid-band + light noise.
-      st.vy += (yMid - st.y) * dt * 0.6;
-      st.vy += (Math.random() - 0.5) * dt * 1.4;
-      st.vy *= Math.pow(0.05, dt); // ~95% damping/s
-      st.y += st.vy * dt;
-      if (st.y < FLY_HEIGHT_MIN) {
-        st.y = FLY_HEIGHT_MIN;
-        st.vy = Math.abs(st.vy) * 0.4;
-      } else if (st.y > FLY_HEIGHT_MAX) {
-        st.y = FLY_HEIGHT_MAX;
-        st.vy = -Math.abs(st.vy) * 0.4;
+        // Vertical: spring toward mid-band + light noise.
+        st.vy += (yMid - st.y) * dt * 0.6;
+        st.vy += (Math.random() - 0.5) * dt * 1.4;
+        st.vy *= Math.pow(0.05, dt); // ~95% damping/s
+        st.y += st.vy * dt;
+        if (st.y < FLY_HEIGHT_MIN) {
+          st.y = FLY_HEIGHT_MIN;
+          st.vy = Math.abs(st.vy) * 0.4;
+        } else if (st.y > FLY_HEIGHT_MAX) {
+          st.y = FLY_HEIGHT_MAX;
+          st.vy = -Math.abs(st.vy) * 0.4;
+        }
       }
 
       // --- write to scene ------------------------------------------
@@ -275,15 +421,15 @@ export function Fireflies() {
       // Slow blink.
       const blink =
         0.5 + 0.5 * Math.sin(time * s.blinkRate * Math.PI * 2 + s.blinkPhase);
-      mat.emissiveIntensity = (0.8 + blink * 2.4) * w;
+      mat.emissiveIntensity = (0.8 + blink * 2.4) * finalW;
       tmpColor.copy(COLOR_COOL).lerp(COLOR_WARM, s.hue);
       mat.color.copy(tmpColor);
       mat.emissive.copy(tmpColor);
       // Halo: scale and opacity track the blink.
-      const haloScale = (0.45 + blink * 0.55) * (0.85 + 0.3 * w);
+      const haloScale = (0.45 + blink * 0.55) * (0.85 + 0.3 * finalW);
       halo.scale.setScalar(haloScale);
       haloMat.color.copy(tmpColor);
-      haloMat.opacity = (0.55 + blink * 0.45) * w;
+      haloMat.opacity = (0.55 + blink * 0.45) * finalW;
     }
   });
 

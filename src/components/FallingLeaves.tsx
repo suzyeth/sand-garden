@@ -65,10 +65,12 @@ function rand(min: number, max: number): number {
   return min + Math.random() * (max - min);
 }
 
-function typeForCycle(t: number): ParticleType {
-  const u = ((t % 1) + 1) % 1;
-  if (u < 0.25) return 'leaf';
-  if (u < 0.5) return 'flower';
+function typeForCycle(_t: number): ParticleType {
+  // Single species — maple leaves only. The earlier sakura-blossom
+  // afternoon felt botanically confused (three species rotating
+  // through the same garden); committing to one species anchors the
+  // scene to a single season (late autumn) and lets every other
+  // muted-palette element sing without competition.
   return 'leaf';
 }
 

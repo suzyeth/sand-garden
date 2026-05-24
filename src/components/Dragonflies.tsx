@@ -14,7 +14,7 @@ import { useStore } from '../sim/store';
  * out at dusk so they don't share the night with fireflies.
  */
 
-const DRAGONFLY_COUNT = 4;
+const DRAGONFLY_COUNT = 2;
 const FLY_RADIUS = 5.5;
 const FLY_HEIGHT_MIN = 0.28;
 const FLY_HEIGHT_MAX = 1.6;
@@ -51,20 +51,24 @@ type FlyState = {
   turnRate: number;
 };
 
+// Unified muted blue-grey palette — the earlier rainbow (electric
+// blue / crimson / violet / amber) was the single biggest colour
+// noise in the daytime scene. Three close variants give individual
+// distinction without competing with the cool sand/stone palette.
 const DRAGONFLY_COLOURS = [
-  '#5cb6d3', // electric blue
-  '#d34c4c', // crimson
-  '#5e8e3e', // dark green
-  '#9b5cc6', // violet
-  '#d39a2c', // amber
+  '#6e7c8c', // slate blue-grey
+  '#8a8f95', // pale steel
+  '#586470', // deep grey-blue
+  '#7a8888',
+  '#677380',
 ];
 
 const WING_TINTS = [
-  '#cfe7ff',
-  '#ffdcd6',
-  '#dff4d6',
-  '#e8d6f4',
-  '#fff0c4',
+  '#dfe6ee',
+  '#e9ecf0',
+  '#d6dde5',
+  '#e2e6eb',
+  '#dbe1e8',
 ];
 
 export function Dragonflies() {
@@ -96,13 +100,14 @@ export function Dragonflies() {
 
   // ---- geometry / materials ---------------------------------------
   const bodyGeom = useMemo(() => {
-    // Long thin capsule, +Z forward.
-    const g = new THREE.CapsuleGeometry(0.008, 0.055, 4, 8);
+    // Long thin capsule, +Z forward. Slimmer + longer than before so
+    // the dragonfly reads as a slender bug, not a fat sausage.
+    const g = new THREE.CapsuleGeometry(0.010, 0.18, 4, 8);
     g.rotateX(Math.PI / 2);
     return g;
   }, []);
-  const headGeom = useMemo(() => new THREE.SphereGeometry(0.012, 10, 8), []);
-  const eyeGeom = useMemo(() => new THREE.SphereGeometry(0.006, 6, 6), []);
+  const headGeom = useMemo(() => new THREE.SphereGeometry(0.022, 12, 10), []);
+  const eyeGeom = useMemo(() => new THREE.SphereGeometry(0.012, 8, 8), []);
   const wingGeom = useMemo(() => {
     // Plane scaled per-wing via instance transform; default size 1.
     const g = new THREE.PlaneGeometry(1, 1);
@@ -117,10 +122,10 @@ export function Dragonflies() {
       new THREE.MeshStandardMaterial({
         color: '#ffffff',
         transparent: true,
-        opacity: 0.32,
+        opacity: 0.5,
         side: THREE.DoubleSide,
-        roughness: 0.25,
-        metalness: 0.0,
+        roughness: 0.2,
+        metalness: 0.05,
         depthWrite: false,
       }),
     [],
@@ -155,13 +160,18 @@ export function Dragonflies() {
 
   useFrame((_, dt) => {
     elapsed.current += dt;
-    const t = useStore.getState().cycleT;
+    const state = useStore.getState();
+    const t = state.cycleT;
     const w = dayWeight(t);
+    // Dragonflies only emerge in the pre-rain lull — when the
+    // weather state is 'cloudy'. Outside of that we keep them hidden,
+    // which makes their appearance feel like a weather signal.
+    const weatherGate = state.weather === 'cloudy';
 
     for (let i = 0; i < DRAGONFLY_COUNT; i++) {
       const g = groupRefs.current[i];
       if (!g) continue;
-      if (w <= 0.001) {
+      if (w <= 0.001 || !weatherGate) {
         if (g.visible) g.visible = false;
         continue;
       }
@@ -269,7 +279,7 @@ export function Dragonflies() {
               headRefs.current[i] = el;
             }}
             geometry={headGeom}
-            position={[0, 0, 0.04]}
+            position={[0, 0.002, 0.118]}
             castShadow
           >
             <meshStandardMaterial
@@ -284,7 +294,7 @@ export function Dragonflies() {
               eyeLRefs.current[i] = el;
             }}
             geometry={eyeGeom}
-            position={[-0.008, 0.004, 0.045]}
+            position={[-0.015, 0.008, 0.130]}
           >
             <meshStandardMaterial color="#1a1410" roughness={0.2} metalness={0.4} />
           </mesh>
@@ -293,59 +303,60 @@ export function Dragonflies() {
               eyeRRefs.current[i] = el;
             }}
             geometry={eyeGeom}
-            position={[0.008, 0.004, 0.045]}
+            position={[0.015, 0.008, 0.130]}
           >
             <meshStandardMaterial color="#1a1410" roughness={0.2} metalness={0.4} />
           </mesh>
           {/* wings — 4 thin transparent panes attached at the thorax.
               Each wing's transform: an inner group hinged at attachment
               point so flap rotation pivots correctly. Wing extends
-              outward (±X) from the hinge. */}
+              outward (±X) from the hinge. Sized for visibility from
+              iso camera. */}
           {/* front-left */}
-          <group position={[0.006, 0.006, 0.005]}>
+          <group position={[0.015, 0.015, 0.012]}>
             <mesh
               ref={(el) => {
                 wingFLRef.current[i] = el;
               }}
               geometry={wingGeom}
-              position={[0.018, 0, 0]}
-              scale={[0.04, 1, 0.012]}
+              position={[0.045, 0, 0]}
+              scale={[0.10, 1, 0.030]}
               material={wingMat}
             />
           </group>
           {/* front-right */}
-          <group position={[-0.006, 0.006, 0.005]}>
+          <group position={[-0.015, 0.015, 0.012]}>
             <mesh
               ref={(el) => {
                 wingFRRef.current[i] = el;
               }}
               geometry={wingGeom}
-              position={[-0.018, 0, 0]}
-              scale={[0.04, 1, 0.012]}
+              position={[-0.045, 0, 0]}
+              scale={[0.10, 1, 0.030]}
               material={wingMat}
             />
           </group>
           {/* back-left */}
-          <group position={[0.006, 0.005, -0.012]}>
+          <group position={[0.015, 0.012, -0.030]}>
             <mesh
               ref={(el) => {
                 wingBLRef.current[i] = el;
               }}
               geometry={wingGeom}
-              position={[0.018, 0, 0]}
-              scale={[0.038, 1, 0.013]}
+              position={[0.045, 0, 0]}
+              scale={[0.095, 1, 0.033]}
               material={wingMat}
             />
           </group>
           {/* back-right */}
-          <group position={[-0.006, 0.005, -0.012]}>
+          <group position={[-0.015, 0.012, -0.030]}>
             <mesh
               ref={(el) => {
                 wingBRRef.current[i] = el;
               }}
               geometry={wingGeom}
-              position={[-0.018, 0, 0]}
-              scale={[0.038, 1, 0.013]}
+              position={[-0.045, 0, 0]}
+              scale={[0.095, 1, 0.033]}
               material={wingMat}
             />
           </group>

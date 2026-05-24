@@ -67,6 +67,9 @@ export function SandPlane() {
   const heightTexture = sandField.texture;
   const simAcc = useRef(0);
   const bgEnabledUniform = useRef<{ value: number }>({ value: 1.0 });
+  // Wetness drives a darker / damper sand look during and after rain.
+  // Lives as a ref to avoid re-rendering the React tree every frame.
+  const wetnessUniform = useRef<{ value: number }>({ value: 0.0 });
   const showGarden = useStore((s) => s.showGarden);
 
   // Push the React-side showGarden state into the shader uniform on change.
@@ -84,6 +87,17 @@ export function SandPlane() {
     // mark dirty every frame so the robot's continuous etches show
     // without waiting for the next sim step
     sandField.upload();
+
+    // Wetness lags behind weather intensity so the sand looks "still
+    // damp" after the rain stops, then slowly dries. Charge up fast
+    // during rain, decay slowly after.
+    const wi = useStore.getState().weatherIntensity;
+    const cur = wetnessUniform.current.value;
+    const target = wi;
+    // Different attack vs decay rates — quick to wet, slow to dry.
+    const rate = target > cur ? 0.9 : 0.18;
+    const ease = 1 - Math.exp(-rate * dt);
+    wetnessUniform.current.value = cur + (target - cur) * ease;
   });
 
   /**
@@ -122,6 +136,7 @@ export function SandPlane() {
       // holds so React-side updates flow into the shader without a
       // recompile.
       shader.uniforms.uBgEnabled = bgEnabledUniform.current;
+      shader.uniforms.uWetness = wetnessUniform.current;
       shader.uniforms.uStonePos = {
         value: SHADER_STONES.map(
           (s) => new THREE.Vector2(s.pos[0], s.pos[1]),
@@ -159,6 +174,7 @@ vSandUv = uv;`,
         '#include <common>',
         `#include <common>
 uniform sampler2D uSandData;
+uniform float uWetness;
 uniform float uTexel;
 uniform float uShadingAmp;
 uniform float uShadingMin;
@@ -258,7 +274,15 @@ float grainNoise = ((n1 - 0.5) * 0.55 + (n2 - 0.5) * 0.45) * 0.06;
 
 // ----- COMPOSITE -----
 float colorMul = clamp(1.0 + bgBright - bgDark + freshShading - freshTint + grainNoise, 0.25, 1.3);
-vec4 diffuseColor = vec4(diffuse * colorMul, opacity);`,
+vec3 sandColor = diffuse * colorMul;
+// Wetness: lerp toward a darker, slightly cooler damp-sand tone. Real
+// wet sand drops to roughly 40-55% of dry brightness with a tan/grey
+// shift; using 0.45 mix at full wetness reads convincingly. Cells
+// that are deeper grooves get even darker because water pools.
+float depthBoost = 1.0 + d * 0.4;
+vec3 wetSandColor = sandColor * vec3(0.45, 0.45, 0.50);
+sandColor = mix(sandColor, wetSandColor, clamp(uWetness * depthBoost, 0.0, 1.0));
+vec4 diffuseColor = vec4(sandColor, opacity);`,
       );
     };
 

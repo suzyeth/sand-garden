@@ -25,11 +25,10 @@ import { SAND_HALF } from '../sim/constants';
 
 type State = 'hidden' | 'flying-in' | 'perching' | 'flying-out';
 
-// Geometry — wingspan ~22cm, body ~5cm, sized so that on the iso
-// camera (zoom 42) the butterfly is ~9 screen pixels across. Smaller
-// disappears into pixel noise.
-const WINGSPAN = 0.22;
-const BODY_LENGTH = 0.05;
+// Geometry — wingspan ~35cm, body ~7cm. Sized up so the wing pattern
+// is legible at iso distance, not lost as a thumb-sized speck.
+const WINGSPAN = 0.34;
+const BODY_LENGTH = 0.07;
 
 // Flight altitude range above ground for the entry/exit waypoints.
 const FLIGHT_ALT_MIN = 0.6;
@@ -75,46 +74,61 @@ function buildButterflyWingTexture(): THREE.CanvasTexture {
   const cx = 8; // body axis position (small inset)
   const cy = h / 2;
 
-  ctx.fillStyle = '#ffffff';
+  // Base wing fill — soft cream / parchment, matching the garden's
+  // overall muted palette instead of fighting it with saturated yellow.
+  ctx.fillStyle = '#ede2c8';
   ctx.beginPath();
   ctx.moveTo(cx, cy - 5);
-  // Top of forewing: arc up and outward.
   ctx.bezierCurveTo(cx + 30, cy - 95, cx + 130, cy - 110, cx + 200, cy - 60);
-  // Outer edge of forewing (slight scallop).
   ctx.bezierCurveTo(cx + 230, cy - 30, cx + 220, cy - 5, cx + 175, cy + 6);
-  // Notch between forewing & hindwing.
   ctx.bezierCurveTo(cx + 145, cy + 10, cx + 140, cy + 12, cx + 130, cy + 20);
-  // Outer edge of hindwing — wider, more rounded.
   ctx.bezierCurveTo(cx + 175, cy + 40, cx + 175, cy + 95, cx + 120, cy + 115);
-  // Bottom of hindwing (slight tail-tip).
   ctx.bezierCurveTo(cx + 70, cy + 130, cx + 30, cy + 110, cx + 18, cy + 65);
-  // Back to body axis.
   ctx.bezierCurveTo(cx + 12, cy + 30, cx + 8, cy + 12, cx, cy + 5);
   ctx.closePath();
   ctx.fill();
 
-  // Subtle dark pattern band along the outer edge of the forewing.
-  ctx.fillStyle = 'rgba(70, 45, 30, 0.65)';
+  // Bold dark border along outer edges of both wings. Walks the outer
+  // 60% of the silhouette path with a thick dark stroke that reads as
+  // a swallowtail's wing border.
+  ctx.lineWidth = 12;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(45, 28, 12, 0.92)';
+  ctx.beginPath();
+  ctx.moveTo(cx + 50, cy - 92);
+  ctx.bezierCurveTo(cx + 130, cy - 110, cx + 200, cy - 60, cx + 230, cy - 30);
+  ctx.bezierCurveTo(cx + 220, cy - 5, cx + 175, cy + 6, cx + 150, cy + 8);
+  ctx.moveTo(cx + 140, cy + 18);
+  ctx.bezierCurveTo(cx + 175, cy + 40, cx + 175, cy + 95, cx + 120, cy + 115);
+  ctx.bezierCurveTo(cx + 70, cy + 130, cx + 30, cy + 110, cx + 18, cy + 65);
+  ctx.stroke();
+
+  // Dark wedge along forewing outer corner — classic monarch/swallowtail
+  // black tip.
+  ctx.fillStyle = 'rgba(35, 20, 10, 0.92)';
   ctx.beginPath();
   ctx.moveTo(cx + 200, cy - 60);
   ctx.bezierCurveTo(cx + 230, cy - 30, cx + 220, cy - 5, cx + 175, cy + 6);
-  ctx.bezierCurveTo(cx + 200, cy - 5, cx + 215, cy - 25, cx + 195, cy - 50);
+  ctx.bezierCurveTo(cx + 195, cy - 5, cx + 210, cy - 30, cx + 195, cy - 55);
   ctx.closePath();
   ctx.fill();
 
-  // Two dark eye-spots on the hindwing.
-  ctx.fillStyle = 'rgba(50, 30, 20, 0.8)';
+  // Single eyespot on the hindwing — two-tone (dark ring + muted
+  // amber centre). Dropped from three layers + secondary spot to one
+  // clean focal pattern.
+  ctx.fillStyle = 'rgba(35, 20, 10, 0.85)';
   ctx.beginPath();
-  ctx.ellipse(cx + 110, cy + 70, 9, 12, 0, 0, Math.PI * 2);
+  ctx.ellipse(cx + 115, cy + 75, 14, 18, 0, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = 'rgba(220, 170, 60, 0.9)';
+  ctx.fillStyle = 'rgba(190, 130, 60, 0.85)';
   ctx.beginPath();
-  ctx.ellipse(cx + 110, cy + 70, 4, 6, 0, 0, Math.PI * 2);
+  ctx.ellipse(cx + 115, cy + 75, 7, 9, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  // Wing veins — thin curved lines from body to outer edge.
-  ctx.strokeStyle = 'rgba(80, 55, 35, 0.42)';
-  ctx.lineWidth = 1.6;
+  // Wing veins — thicker + darker so they read at distance.
+  ctx.strokeStyle = 'rgba(50, 30, 14, 0.75)';
+  ctx.lineWidth = 3.2;
   ctx.lineCap = 'round';
   const veins: Array<[number, number, number, number, number, number]> = [
     [cx + 4, cy - 5, cx + 50, cy - 60, cx + 120, cy - 85],
@@ -299,13 +313,13 @@ export function Butterfly() {
           <planeGeometry args={[wingWidth, wingLength]} />
           <meshStandardMaterial
             map={wingTexture}
-            color="#f4ecdc"
+            color="#f0e6cf"
             side={THREE.DoubleSide}
             transparent
             alphaTest={0.4}
-            roughness={0.75}
-            emissive="#f4ecdc"
-            emissiveIntensity={0.04}
+            roughness={0.78}
+            emissive="#f0e6cf"
+            emissiveIntensity={0.03}
           />
         </mesh>
       </group>
@@ -320,13 +334,13 @@ export function Butterfly() {
           <planeGeometry args={[wingWidth, wingLength]} />
           <meshStandardMaterial
             map={wingTexture}
-            color="#f4ecdc"
+            color="#f0e6cf"
             side={THREE.DoubleSide}
             transparent
             alphaTest={0.4}
-            roughness={0.75}
-            emissive="#f4ecdc"
-            emissiveIntensity={0.04}
+            roughness={0.78}
+            emissive="#f0e6cf"
+            emissiveIntensity={0.03}
           />
         </mesh>
       </group>

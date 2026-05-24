@@ -188,6 +188,11 @@ export function Robot({ startPosition }: Props) {
 
   useFrame((_, dt) => {
     if (!group.current || !rakeGroup.current) return;
+    // Clamp dt so a paused tab / dropped frame doesn't push the path
+    // playback forward by metres in one step. Anything past 1/15s is
+    // treated as 1/15s — the visuals will momentarily lag instead of
+    // teleporting + dragging an etch line across the garden.
+    if (dt > 1 / 15) dt = 1 / 15;
 
     // ---- battery FSM dispatch ----------------------------------------
     // While docking / transiting, we steer the chassis manually instead
@@ -406,37 +411,57 @@ export function Robot({ startPosition }: Props) {
       const rightX = -rfz;
       const rightZ = rfx;
       const depth = ETCH_DEPTH_PER_SEC * downFrac;
-      // Compute the world position of each tooth NOW. If the tooth
-      // lands close to an existing groove, blend its position partway
-      // toward that groove's centroid — re-treads then write to the
-      // same cells instead of leaving a ghost parallel line. Snap
-      // strength is partial so the rake doesn't magnet onto unrelated
-      // nearby trails.
-      const SNAP_SEARCH_M = 0.045;
-      const SNAP_MIN_DEPTH = 0.22;
-      const SNAP_STRENGTH = 0.7;
+      // Snap the WHOLE rake as a rigid bar, not each tooth
+      // independently. Per-tooth snap was making each tooth chase a
+      // different groove centroid, which produced jittery dotted
+      // lines instead of clean continuous arcs. Snapping the rake
+      // centre once and applying the same delta to every tooth keeps
+      // the rake geometry rigid while still letting re-passes drift
+      // onto established grooves.
+      const SNAP_SEARCH_M = 0.035;
+      const SNAP_MIN_DEPTH = 0.3;
+      const SNAP_STRENGTH = 0.4;
+      const [snapCx, snapCz] = sandField.snapToGroove(
+        rakeCenterX,
+        rakeCenterZ,
+        SNAP_SEARCH_M,
+        SNAP_MIN_DEPTH,
+      );
+      const deltaX = (snapCx - rakeCenterX) * SNAP_STRENGTH;
+      const deltaZ = (snapCz - rakeCenterZ) * SNAP_STRENGTH;
+      const adjustedCx = rakeCenterX + deltaX;
+      const adjustedCz = rakeCenterZ + deltaZ;
       const currTeeth: Array<[number, number]> = [];
       for (const off of TEETH_OFFSETS_X) {
-        const tx = rakeCenterX + rightX * off;
-        const tz = rakeCenterZ + rightZ * off;
-        const [snapX, snapZ] = sandField.snapToGroove(
-          tx,
-          tz,
-          SNAP_SEARCH_M,
-          SNAP_MIN_DEPTH,
-        );
-        const finalX = tx + (snapX - tx) * SNAP_STRENGTH;
-        const finalZ = tz + (snapZ - tz) * SNAP_STRENGTH;
-        currTeeth.push([finalX, finalZ]);
+        const tx = adjustedCx + rightX * off;
+        const tz = adjustedCz + rightZ * off;
+        currTeeth.push([tx, tz]);
       }
       if (prevTeeth.current) {
         // Drag each tooth from its previous world position to the
         // current one as a thin groove. This is what gives the trail
         // continuous-line crispness instead of a stamp pattern.
-        for (let k = 0; k < TEETH_OFFSETS_X.length; k++) {
-          const [px, pz] = prevTeeth.current[k];
-          const [cx, cz] = currTeeth[k];
-          sandField.etchLine(px, pz, cx, cz, TOOTH_RADIUS, depth, dt);
+        //
+        // Discontinuity guard: a normal per-frame step is ~1-2cm. If
+        // the gap is much larger, the frame was a hiccup or we just
+        // crossed a sampling discontinuity (e.g. transit boundary
+        // sneak-through). Skip the drag, do a point-stamp instead,
+        // so we never paint a long ghost line between two unrelated
+        // rake positions.
+        const MAX_VALID_STEP = 0.12; // m
+        const [px0, pz0] = prevTeeth.current[0];
+        const [cx0, cz0] = currTeeth[0];
+        const stepDist = Math.hypot(cx0 - px0, cz0 - pz0);
+        if (stepDist > MAX_VALID_STEP) {
+          for (const [tx, tz] of currTeeth) {
+            sandField.etch(tx, tz, TOOTH_RADIUS, depth, dt);
+          }
+        } else {
+          for (let k = 0; k < TEETH_OFFSETS_X.length; k++) {
+            const [px, pz] = prevTeeth.current[k];
+            const [cx, cz] = currTeeth[k];
+            sandField.etchLine(px, pz, cx, cz, TOOTH_RADIUS, depth, dt);
+          }
         }
       } else {
         // First frame of fresh contact: stamp once at the current pose

@@ -111,7 +111,7 @@ type Branchlet = {
 // Per-cane gentle curve — the shader bends the cane's top, so we mirror
 // that bend here in TS so branchlets / leaves still meet the cane
 // surface. Seed is the cane's world XZ, matching the shader expression.
-const CANE_CURVE_AMP = 0.12; // metres at very tip
+const CANE_CURVE_AMP = 0.40; // metres at very tip — should be obvious
 function caneCurveOffset(
   canePosX: number,
   canePosZ: number,
@@ -328,6 +328,56 @@ export function Periphery() {
     return all;
   }, [branchlets]);
 
+  // Ground at the base of each bamboo cluster: a moss carpet plus a
+  // handful of young bamboo shoots. Reads as "the grove has been
+  // alive here for years" instead of "someone stuck sticks in sand".
+
+  // Young bamboo shoots — short tapered cylinders sprinkled inside
+  // each cluster. Slightly fatter at the base, lighter green than the
+  // mature canes since shoots have a paler, almost yellow tint.
+  const bambooShoots = useMemo(() => {
+    type Shoot = {
+      x: number;
+      z: number;
+      height: number;
+      radius: number;
+      colour: THREE.Color;
+      lean: number;
+    };
+    const shoots: Shoot[] = [];
+    const SHOOT_COLOR_PALE = new THREE.Color('#b9c585');
+    const SHOOT_COLOR_GREEN = new THREE.Color('#7f9a44');
+    BAMBOO_CLUSTERS.forEach((cluster, ci) => {
+      const count = 3 + Math.floor(hash(ci * 7.3) * 3); // 3-5
+      const spread = cluster.clumpRadius * 0.9;
+      for (let i = 0; i < count; i++) {
+        const a = hash(ci * 13.7 + i * 3.1);
+        const b = hash(ci * 19.3 + i * 5.7);
+        const r = Math.pow(a, 0.5) * spread;
+        const theta = b * Math.PI * 2;
+        const colour = new THREE.Color().lerpColors(
+          SHOOT_COLOR_GREEN,
+          SHOOT_COLOR_PALE,
+          hash(ci * 23.1 + i * 1.9),
+        );
+        shoots.push({
+          x: cluster.center[0] + Math.cos(theta) * r,
+          z: cluster.center[1] + Math.sin(theta) * r,
+          height: 0.16 + hash(ci * 29.1 + i * 2.3) * 0.18, // 16-34cm
+          radius: 0.022 + hash(ci * 31.7 + i * 1.7) * 0.014,
+          colour,
+          lean: (hash(ci * 37.1 + i * 4.3) - 0.5) * 0.12,
+        });
+      }
+    });
+    return shoots;
+  }, []);
+
+  const shootGeom = useMemo(
+    () => new THREE.CylinderGeometry(0.35, 1.0, 1, 8, 1),
+    [],
+  );
+
   const leafTexture = useMemo(() => buildLeafTexture(), []);
   const leafGeom = useMemo(() => new THREE.PlaneGeometry(1, 1, 1, 1), []);
   const leafMat = useMemo(
@@ -424,10 +474,11 @@ export function Periphery() {
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   }, [leaves]);
-  const tufts = useMemo(
-    () => buildGrassTufts(-CORNER_DIST, -CORNER_DIST, 5),
-    [],
-  );
+  // SW corner left intentionally empty — karesansui 'ma' (negative
+  // space). The grass tufts that used to sit here were pulling the
+  // viewer's eye to nothing in particular; the empty quadrant gives
+  // the rest of the garden room to breathe.
+  const tufts = useMemo(() => [] as Tuft[], []);
 
   // Tapered cane. Geometry handles the gentle linear taper (top 75%
   // of bottom radius); the vertex shader adds an exponential taper in
@@ -466,16 +517,16 @@ varying float vCaneYFrac;`,
 float yFrac = position.y + 0.5;
 vCaneYFrac = yFrac;
 
-// Exponential taper in the top ~22% of the cane. At yFrac = 0.78
-// nothing happens; at yFrac = 1 the radius is pulled in by ~42%.
-float topTaper = pow(max(0.0, yFrac - 0.78) * 4.55, 1.85) * 0.46;
+// Exponential taper in the top ~22% of the cane. Aggressive enough
+// that the very tip is noticeably narrower than the body.
+float topTaper = pow(max(0.0, yFrac - 0.74) * 3.85, 1.7) * 0.55;
 
-// Subtle node bulge — a small radial swell at each ~33cm node ring
-// so the cane has a knot silhouette, not just a colour band.
+// Node bulge — radial swell at each node ring so the cane has
+// visible knots in silhouette, not just a colour band.
 float nodePhase = fract(yFrac * 9.0);
-float nodeBulge = 0.045 *
-  smoothstep(0.42, 0.50, nodePhase) *
-  smoothstep(0.58, 0.50, nodePhase);
+float nodeBulge = 0.12 *
+  smoothstep(0.38, 0.50, nodePhase) *
+  smoothstep(0.62, 0.50, nodePhase);
 
 float xzScale = max(0.0, 1.0 - topTaper) + nodeBulge;
 transformed = vec3(position.x * xzScale, position.y, position.z * xzScale);
@@ -490,7 +541,7 @@ float caneBaseX = modelMatrix[3][0];
 float caneBaseZ = modelMatrix[3][2];
 float curveSeed = caneBaseX * 1.31 + caneBaseZ * 2.07;
 vec2 curveDir = vec2(sin(curveSeed), cos(curveSeed));
-float curveAmp = pow(max(0.0, yFrac), 1.6) * 0.12;
+float curveAmp = pow(max(0.0, yFrac), 1.6) * 0.40;
 float scaleXZ = length(modelMatrix[0].xyz);
 vec2 bendOffset = (scaleXZ > 0.0001) ? (curveDir * curveAmp / scaleXZ) : vec2(0.0);
 transformed.x += bendOffset.x;
@@ -511,12 +562,12 @@ float caneHash(vec2 p){ p=fract(p*vec2(123.34,456.21)); p+=dot(p,p+45.32); retur
         `vec4 diffuseColor = vec4( diffuse, opacity );
 
 // Periodic node bands — dark rings every ~33cm of world Y. Wider
-// and darker than before so the joints actually read.
+// + darker so the joints are unmistakable, not a hint.
 float bandPos = fract(vCaneWorld.y * 3.0);
 float band =
-  smoothstep(0.90, 0.99, bandPos) *
-  smoothstep(1.08, 0.99, bandPos);
-diffuseColor.rgb *= 1.0 - band * 0.58;
+  smoothstep(0.84, 0.99, bandPos) *
+  smoothstep(1.14, 0.99, bandPos);
+diffuseColor.rgb *= 1.0 - band * 0.55;
 
 // Vertical streak noise — fine grain so the cane reads as natural.
 float n = caneHash(vec2(vCaneWorld.x * 9.0, vCaneWorld.y * 1.4));
@@ -530,7 +581,7 @@ diffuseColor.rgb *= 1.0 + (fibre - 0.5) * 0.08;
 
 // Vertical tint gradient: shaded near the base, brighter / warmer
 // toward the tip where the sun reaches first.
-float tipTint = (vCaneYFrac - 0.45) * 0.42;
+float tipTint = (vCaneYFrac - 0.42) * 0.58;
 diffuseColor.rgb *= 1.0 + tipTint;`,
       );
     };
@@ -590,6 +641,7 @@ diffuseColor.rgb *= 1.0 + shade;`,
 
   const tuftColour = useMemo(() => new THREE.Color('#6b8a3e'), []);
 
+
   return (
     <>
       {/* NE corner — bamboo cluster. Each cane clones the base
@@ -603,6 +655,12 @@ diffuseColor.rgb *= 1.0 + shade;`,
             c.greenLerp,
           );
           const mat = caneBaseMat.clone();
+          // Material.clone() does NOT copy onBeforeCompile — three.js
+          // bug-trap. Re-attach so each cane's shader actually runs
+          // our injected curve + taper + node-band code. The cache
+          // key forces a fresh program compile per design version.
+          mat.onBeforeCompile = caneBaseMat.onBeforeCompile;
+          mat.customProgramCacheKey = () => 'sand-garden-cane-v3';
           mat.color = colour;
           return (
             <mesh
@@ -617,6 +675,28 @@ diffuseColor.rgb *= 1.0 + shade;`,
             </mesh>
           );
         })}
+      </group>
+
+      {/* young bamboo shoots — a few short tapered cylinders sprinkled
+          inside each cluster, paler green than the mature canes */}
+      <group>
+        {bambooShoots.map((sh, i) => (
+          <mesh
+            key={`bshoot-${i}`}
+            position={[sh.x, sh.height / 2, sh.z]}
+            rotation={[sh.lean, 0, sh.lean * 0.7]}
+            scale={[sh.radius, sh.height, sh.radius]}
+            geometry={shootGeom}
+            castShadow
+            receiveShadow
+          >
+            <meshStandardMaterial
+              color={sh.colour}
+              roughness={0.55}
+              metalness={0.05}
+            />
+          </mesh>
+        ))}
       </group>
 
       {/* bamboo branchlets — thin twigs at upper nodes that the leaf

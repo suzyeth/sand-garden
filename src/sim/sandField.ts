@@ -96,7 +96,7 @@ class SandField {
         if (d2 < r2) {
           const falloff = 1 - Math.sqrt(d2) / r;
           const idx = j * this.size + i;
-          this.grid[idx] = Math.min(1, this.grid[idx] + dtDepth * falloff);
+          this.grid[idx] = Math.min(0.7, this.grid[idx] + dtDepth * falloff);
         }
       }
     }
@@ -155,7 +155,48 @@ class SandField {
         if (d2 < r2) {
           const falloff = 1 - Math.sqrt(d2) / r;
           const idx = rowOff + i;
-          this.grid[idx] = Math.min(1, this.grid[idx] + dtDepth * falloff);
+          this.grid[idx] = Math.min(0.7, this.grid[idx] + dtDepth * falloff);
+        }
+      }
+    }
+  }
+
+  /**
+   * Inverse of etch — push the height field back toward 0 (pristine)
+   * within a radius around a world-space point. Used by small animals
+   * crossing the sand: their feet scuff existing rake grooves so the
+   * trail visibly disturbs the karesansui pattern, not just adds a
+   * faint deeper line that's invisible against the rake's saturation.
+   *
+   * strength is depth/sec — scaled by falloff and dt. Cells go down
+   * (toward 0); never increased.
+   */
+  disturb(
+    x: number,
+    z: number,
+    radiusMeters: number,
+    strength: number,
+    dt: number,
+  ) {
+    const [cx, cz] = this.worldToCell(x, z);
+    const cellsPerMeter = this.size / this.worldSize;
+    const r = radiusMeters * cellsPerMeter;
+    const r2 = r * r;
+    const dtAmount = strength * dt;
+    const iMin = Math.max(0, Math.floor(cx - r));
+    const iMax = Math.min(this.size - 1, Math.ceil(cx + r));
+    const jMin = Math.max(0, Math.floor(cz - r));
+    const jMax = Math.min(this.size - 1, Math.ceil(cz + r));
+    for (let j = jMin; j <= jMax; j++) {
+      const rowOff = j * this.size;
+      const dj = j + 0.5 - cz;
+      for (let i = iMin; i <= iMax; i++) {
+        const di = i + 0.5 - cx;
+        const d2 = di * di + dj * dj;
+        if (d2 < r2) {
+          const falloff = 1 - Math.sqrt(d2) / r;
+          const idx = rowOff + i;
+          this.grid[idx] = Math.max(0, this.grid[idx] - dtAmount * falloff);
         }
       }
     }

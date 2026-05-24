@@ -8,6 +8,8 @@ import { HomeStone } from './HomeStone';
 import { Robot } from './Robot';
 import { Butterfly } from './Butterfly';
 import { Dragonflies } from './Dragonflies';
+import { Gecko } from './Gecko';
+import { Weather } from './Weather';
 import { Periphery } from './Periphery';
 import { StoneLantern } from './StoneLantern';
 import { FallingLeaves } from './FallingLeaves';
@@ -32,6 +34,8 @@ export function Garden() {
       <Robot startPosition={[0, 0.4, 0]} />
       <Butterfly />
       <Dragonflies />
+      <Gecko />
+      <Weather />
       <StoneLantern position={[-5.8, 0, 5.4]} />
       <Periphery />
       <FallingLeaves />

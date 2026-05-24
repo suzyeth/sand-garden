@@ -152,12 +152,43 @@ function SceneLighting() {
 
   useFrame((_, dt) => {
     cycleClock.current += dt;
+
+    // Light position update runs EVERY frame — otherwise the shadows
+    // jump in 100ms steps and visibly "snap" at dusk and dawn. This is
+    // cheap (just a position vector) so it's safe at 60fps.
+    const t =
+      (cycleClock.current % CYCLE_DURATION_SEC) / CYCLE_DURATION_SEC;
+    if (dirLight.current) {
+      // Day + night arcs are designed so the directional light
+      // height ly is CONTINUOUS at the handoff (t=0.5) and at the
+      // wrap (t=1=0). Both arcs touch down at the same horizon
+      // height (ly=4), which is where the dusk keyframe expects the
+      // sun to be — long shadows, low orange light. Without this the
+      // moon used to start higher than the sun ended, so shadows
+      // suddenly got shorter right at dusk instead of stretching.
+      let lx: number, ly: number;
+      if (t < 0.5) {
+        const dDay = t * 2;
+        lx = 15 * (1 - 2 * dDay); // +15 east → -15 west
+        ly = 4 + 18 * Math.sin(dDay * Math.PI); // 4 horizon → 22 noon
+      } else {
+        const dNight = (t - 0.5) * 2;
+        lx = -15 + 30 * dNight; // -15 west → +15 east
+        ly = 4 + 11 * Math.sin(dNight * Math.PI); // 4 horizon → 15 midnight
+      }
+      // Z held constant so shadow direction doesn't drift sideways
+      // independently of the sun's east-west march.
+      dirLight.current.position.set(lx, ly, 8);
+      dirLight.current.target.updateMatrixWorld();
+    }
+
+    // Sky + colour interpolation still runs at the throttled rate —
+    // it's a canvas redraw + colour set, more expensive than the
+    // position update.
     updateAccum.current += dt;
     if (updateAccum.current < 1 / SKY_UPDATE_HZ) return;
     updateAccum.current = 0;
 
-    const t =
-      (cycleClock.current % CYCLE_DURATION_SEC) / CYCLE_DURATION_SEC;
     const phaseF = t * KEYFRAMES.length;
     const idx = Math.floor(phaseF) % KEYFRAMES.length;
     const next = (idx + 1) % KEYFRAMES.length;
@@ -196,32 +227,13 @@ function SceneLighting() {
       fog.far = a.fogFar + (b.fogFar - a.fogFar) * u;
     }
 
-    // Lights.
+    // Lights — color + intensity only here. Position runs every frame
+    // above so the shadow motion stays smooth.
     if (dirLight.current) {
       tmpA.set(a.dirColor).lerp(tmpC.set(b.dirColor), u);
       dirLight.current.color.copy(tmpA);
       dirLight.current.intensity =
         a.dirIntensity + (b.dirIntensity - a.dirIntensity) * u;
-
-      // Sun / moon arc — the directional light follows the cycle.
-      // Day half (t < 0.5): sun arcs from east (+X, low) through high
-      // overhead (centre) to west (-X, low).
-      // Night half (t >= 0.5): "moon" arcs back from west to east at a
-      // lower peak. Shadows on the sand follow accordingly.
-      let lx: number, ly: number, lz: number;
-      if (t < 0.5) {
-        const dDay = t * 2; // 0..1 across the day half
-        lx = 15 * (1 - 2 * dDay);
-        ly = 6 + 19 * Math.sin(dDay * Math.PI);
-        lz = 8;
-      } else {
-        const dNight = (t - 0.5) * 2; // 0..1 across the night half
-        lx = -15 + 30 * dNight;
-        ly = 5 + 13 * Math.sin(dNight * Math.PI);
-        lz = -2;
-      }
-      dirLight.current.position.set(lx, ly, lz);
-      dirLight.current.target.updateMatrixWorld();
     }
     if (ambLight.current) {
       tmpA.set(a.ambColor).lerp(tmpC.set(b.ambColor), u);
