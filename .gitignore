@@ -1,0 +1,15 @@
+node_modules
+dist
+.DS_Store
+*.local
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.log
+
+# macOS AppleDouble metadata from external drive
+._*
+.DS_Store
+
+# Claude Code / IDE local config
+.claude/
