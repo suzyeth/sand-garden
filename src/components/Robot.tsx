@@ -71,33 +71,31 @@ const CHARGE_RATE_PER_SEC = 3.0; // %/s while docked
 const DOCK_SETTLE_TIME = 1.4; // s before charging starts
 const DOCK_DEPART_TIME = 1.1; // s after fully charged before leaving
 // Park INSIDE the garage at the home stone position. HOME_STONE_POS
-// is the dock structure at SE corner (6.2, -6.2). The garage is now
-// axis-aligned with opening facing world +Z, so the robot's parked
-// centre sits 0.25m north of the stone, chassis fully inside and
-// nose pointing toward the back wall (-Z direction).
+// is the dock structure at SE corner (6.2, -6.2). The garage opens
+// to -X (west, toward the garden interior); robot's parked centre
+// sits 0.25m west of the stone, chassis fully inside, nose pointing
+// into the back wall on the +X side.
 const DOCK_POS: [number, number] = [
-  HOME_STONE_POS[0],
-  HOME_STONE_POS[1] + 0.25,
+  HOME_STONE_POS[0] - 0.25,
+  HOME_STONE_POS[1],
 ];
 // Yaw the robot should hold while parked — nose pointing into the
-// back of the garage (local -Z direction in world coords with
-// GARAGE_YAW=0). atan2(0, +0.25) = 0, meaning the robot's local
-// axes match world, with local -Z (front, LED end) facing -Z (back
-// of garage). Kept as the formula so any DOCK_POS tweak stays in
-// sync automatically.
+// back of the garage (+X direction in world). The formula naturally
+// produces the right value from the DOCK_POS / HOME_STONE_POS delta
+// so any further DOCK_POS tweak stays in sync.
 const DOCK_YAW = Math.atan2(
   HOME_STONE_POS[0] - DOCK_POS[0],
   -(HOME_STONE_POS[1] - DOCK_POS[1]),
 );
-// Intermediate approach waypoint — sits 0.85m north of DOCK_POS,
+// Intermediate approach waypoint — sits 0.85m west of DOCK_POS,
 // just outside the garage opening on the centreline. Seek-home
-// always reaches this point first, then drives straight south into
+// always reaches this point first, then drives straight east into
 // the dock. Without it, a low-battery event triggered while raking
 // near the home stone made the robot approach from the side and
 // clip the garage's flank on the way in.
 const APPROACH_POS: [number, number] = [
-  DOCK_POS[0],
-  DOCK_POS[1] + 0.85,
+  DOCK_POS[0] - 0.85,
+  DOCK_POS[1],
 ];
 const APPROACH_REACHED_EPS = 0.18;
 const SEEK_SPEED = 1.25; // m/s — decisive but not panicked

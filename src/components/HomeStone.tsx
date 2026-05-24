@@ -25,11 +25,12 @@ type Props = {
  *   - Status finial (small antenna + LED on a stone post in the
  *     back of the bay)
  */
-// Axis-aligned (was -π/4 facing NW). Opening now faces world +Z,
-// which from the iso camera at (20,20,20) is the most camera-facing
-// direction — dot product with view ~0.885 vs 0.297 at the old
-// diagonal orientation. Robot inside is fully visible head-on.
-const GARAGE_YAW = 0;
+// Rotated 90° clockwise from the previous +Z-facing orientation —
+// opening now faces -X (west, toward the garden interior). With the
+// home stone at SE corner (6.2, -6.2), opening west means the
+// robot enters from the open garden side. Still axis-aligned, just
+// a different cardinal face.
+const GARAGE_YAW = -Math.PI / 2;
 const GARAGE_INTERIOR_W = 1.0;
 const GARAGE_INTERIOR_D = 1.4;
 const GARAGE_WALL_THICK = 0.14;

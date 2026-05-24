@@ -64,6 +64,15 @@ const HEAD_LEAD_MAX = 0.55; // rad — cap so the head doesn't twist absurdly
 // gecko doesn't feel statue-frozen. ~1.3 Hz, ±5mm.
 const BREATH_HZ = 1.3;
 const BREATH_AMP = 0.005;
+// Gait stride — one full leg cycle per this much distance walked.
+// Tuned to ~0.07m so a slow dash shows a slow gait and a fast dash
+// shows a brisk one, but both have ONE leg cycle per ~body length
+// of travel. Reads as "stepping" instead of "leg-paddling".
+const GAIT_STRIDE = 0.07;
+// Body S-bend wave amplitude — lateral X offset (perpendicular to
+// body Z axis) per segment. The mid segment lags the front by
+// ~half wavelength; back lags front by ~full wavelength.
+const BODY_WAVE_AMP = 0.011;
 // Sand etch parameters — much smaller than the rake's tooth.
 const ETCH_RADIUS = 0.018;
 const ETCH_DEPTH_PER_SEC = 2.2;
@@ -83,6 +92,9 @@ const ABSENT_MIN = 70;
 const ABSENT_MAX = 180;
 const PRESENT_MIN = 25;
 const PRESENT_MAX = 75;
+// Arrival fade-in: when the gecko appears it scales up from 0 → 1
+// over this many seconds, so the new visit doesn't pop in.
+const ARRIVE_FADE_SEC = 0.8;
 
 function dayWeight(t: number): number {
   const u = ((t % 1) + 1) % 1;
@@ -127,6 +139,12 @@ export function Gecko() {
     null,
   );
   const leaveTimeout = useRef(0);
+  // Arrival scale ramp — 0 on spawn, eases up to 1 over ARRIVE_FADE_SEC.
+  // When entering 'leaving' it stays at 1; on leave-completion it
+  // reverts to 0 via group.visible toggle. The fade is purely scale,
+  // no opacity, since the gecko has multiple sub-materials and
+  // toggling each one's opacity is fragile.
+  const arriveTimer = useRef(0);
   const currentSpeed = useRef(0);
   // Target speed the FSM sets at decision time; currentSpeed lerps
   // toward it so accelerations aren't step-functions.
@@ -178,11 +196,30 @@ export function Gecko() {
     g.rotateX(Math.PI / 2);
     return g;
   }, []);
-  const bodyGeom = useMemo(() => {
-    const g = new THREE.CapsuleGeometry(0.024, 0.072, 4, 10);
+  // Body split into THREE segments (front / mid / back) so the
+  // chassis can S-bend laterally as the gecko walks — single-mesh
+  // body was rigid and made the motion read as "swimming" rather
+  // than "walking". Each segment is a short capsule + per-frame X
+  // offset with phase lag so the wave propagates from head to tail.
+  const bodyFrontGeom = useMemo(() => {
+    const g = new THREE.CapsuleGeometry(0.024, 0.022, 4, 10);
     g.rotateX(Math.PI / 2);
     return g;
   }, []);
+  const bodyMidGeom = useMemo(() => {
+    const g = new THREE.CapsuleGeometry(0.026, 0.024, 4, 10);
+    g.rotateX(Math.PI / 2);
+    return g;
+  }, []);
+  const bodyBackGeom = useMemo(() => {
+    const g = new THREE.CapsuleGeometry(0.022, 0.022, 4, 10);
+    g.rotateX(Math.PI / 2);
+    return g;
+  }, []);
+  // Dorsal hump — flattened sphere sitting on top of bodyMid for a
+  // visible spine ridge. Without it the gecko silhouette from iso
+  // reads as a flat blob.
+  const dorsalGeom = useMemo(() => new THREE.SphereGeometry(0.018, 10, 8), []);
   const tailGeom1 = useMemo(() => {
     const g = new THREE.CapsuleGeometry(0.016, 0.055, 4, 8);
     g.rotateX(Math.PI / 2);
@@ -204,6 +241,17 @@ export function Gecko() {
   const tail2Ref = useRef<THREE.Mesh>(null);
   const eyeLRef = useRef<THREE.Mesh>(null);
   const eyeRRef = useRef<THREE.Mesh>(null);
+  // Body segment refs — driven by per-frame X-offset wave for the
+  // S-bend.
+  const bodyFrontRef = useRef<THREE.Mesh>(null);
+  const bodyMidRef = useRef<THREE.Mesh>(null);
+  const bodyBackRef = useRef<THREE.Mesh>(null);
+  // Distance walked since last frame — accumulates to drive the gait
+  // phase. Real lizards take one full leg cycle per ~one body length
+  // of travel; the GAIT_STRIDE constant maps distance to phase.
+  const distanceWalked = useRef(0);
+  // Previous-frame position so we can compute the per-frame delta.
+  const prevPos = useRef<[number, number]>([0, 0]);
   // Legs — each is a small <group> at the leg's anchor so we can
   // rotate around Y to swing the leg forward/back as the gecko
   // walks. Trot gait: front-left + back-right swing together,
@@ -287,6 +335,9 @@ export function Gecko() {
         // pop in mid-pivot.
         headingTarget.current = heading.current;
         bodyYaw.current = heading.current;
+        // Reset arrival fade — gecko scales up from 0 over the next
+        // ARRIVE_FADE_SEC seconds rather than popping in full size.
+        arriveTimer.current = 0;
         visitMode.current = 'present';
         visitTimer.current =
           PRESENT_MIN + Math.random() * (PRESENT_MAX - PRESENT_MIN);
@@ -391,8 +442,12 @@ export function Gecko() {
             LOOK_DUR_MIN + Math.random() * (LOOK_DUR_MAX - LOOK_DUR_MIN);
         }
       } else {
-        // After a look, go back to freeze briefly before next dash —
-        // gives a "decided, then went" feel.
+        // After a look, commit the body toward where the head was
+        // pointing — set the heading target half-way to the look
+        // amplitude so the next dash naturally faces the inspected
+        // direction. Reads as "decided after looking" rather than
+        // "looked, forgot, picked a random direction".
+        headingTarget.current += lookAmp.current * 0.5;
         modeRef.current = 'freeze';
         modeTimer.current = 0.2 + Math.random() * 0.6;
       }
@@ -414,12 +469,17 @@ export function Gecko() {
     // mode only swivels the head, not the entire body.
     let headOffset = 0;
     if (modeRef.current === 'dash') {
-      // Speed ramps up over the first 0.15s of the dash, then taper
-      // toward the end (anticipation + follow-through, no slam-stop).
-      const t = 1 - modeTimer.current /
-        ((DASH_DUR_MIN + DASH_DUR_MAX) * 0.5);
-      const envelope = THREE.MathUtils.smoothstep(t, 0, 0.22) *
-        (1 - THREE.MathUtils.smoothstep(t, 0.72, 1.0) * 0.55);
+      // Burst envelope: fast rise to peak in first ~12% of the dash
+      // (the "push"), then long decay via (1-t)^0.8. Reads as a real
+      // lizard burst — explosive start, glide-and-slow tail —
+      // instead of a symmetric smoothstep ramp.
+      const t = THREE.MathUtils.clamp(
+        1 - modeTimer.current / ((DASH_DUR_MIN + DASH_DUR_MAX) * 0.5),
+        0,
+        1,
+      );
+      const envelope =
+        THREE.MathUtils.smoothstep(t, 0, 0.12) * Math.pow(1 - t, 0.8);
       // While orienting, hold position — the body is still rotating
       // into place. Clear orient flag once the smoothed yaw is close
       // enough to the kinematic heading.
@@ -435,7 +495,11 @@ export function Gecko() {
     } else if (modeRef.current === 'look') {
       // Look — head only. Body stays facing heading.current; the
       // head swings to one side, holds briefly, returns. Bell curve
-      // over the look duration so the swing eases at both ends.
+      // is keyed to the ACTUAL remaining modeTimer (not a constant
+      // average) so the swing always lasts exactly as long as the
+      // look mode itself, regardless of which random duration was
+      // picked. Previously used a constant which made the head
+      // sometimes finish swinging before the mode ended, then snap.
       const lookDur =
         LOOK_DUR_MIN + (LOOK_DUR_MAX - LOOK_DUR_MIN) * 0.5;
       lookPhase.current += dt / lookDur;
@@ -443,6 +507,15 @@ export function Gecko() {
       const bell = Math.sin(phase * Math.PI); // 0 → 1 → 0
       headOffset = lookAmp.current * bell;
     }
+
+    // Stone repulsion — was direct position push + heading nudge,
+    // which could jerk the chassis. Now we ONLY nudge the heading
+    // target (and the heading lerp smooths the change) UNLESS the
+    // gecko is actually overlapping the stone, in which case we
+    // still push it out. Reads as a slow steer-around instead of
+    // a hard bump.
+    // (Real stone-repulsion code is below; this comment frames why
+    // the math is split between target nudge + emergency push.)
 
     // Steer back to the safe zone if drifting too close to the wall.
     // Mutates the TARGET so the heading lerp smooths the correction.
@@ -455,23 +528,33 @@ export function Gecko() {
       headingTarget.current += dh * Math.min(1, 1.6 * dt);
     }
 
-    // Stay away from stones — soft repulsion if too close. Position
-    // push is still direct (collision avoidance), but the heading
-    // nudge goes through the target → lerp pipeline.
+    // Stay away from stones — split into a smooth "steer around"
+    // zone and a hard "actually overlapping, push out" zone. In the
+    // steer zone (within 1.5x safe distance) we only nudge the
+    // heading target. Position is only force-pushed when the gecko
+    // is literally inside the stone's safe radius — that's the only
+    // case where direct kinematic correction is justified.
     for (const stone of SHADER_STONES) {
       const dx = here.x - stone.pos[0];
       const dz = here.z - stone.pos[1];
       const d = Math.hypot(dx, dz);
+      if (d <= 0.01) continue;
       const safe = stone.radius + CHASSIS_SAFETY * 0.5;
-      if (d < safe && d > 0.01) {
-        const push = (safe - d) * 0.6;
-        here.x += (dx / d) * push;
-        here.z += (dz / d) * push;
+      const steerZone = safe * 1.5;
+      if (d < steerZone) {
         const away = Math.atan2(dx, dz);
         let dh = away - headingTarget.current;
         while (dh > Math.PI) dh -= Math.PI * 2;
         while (dh < -Math.PI) dh += Math.PI * 2;
-        headingTarget.current += dh * Math.min(1, 3.0 * dt);
+        // Steer strength grows as we get closer.
+        const closeness = 1 - d / steerZone;
+        headingTarget.current += dh * Math.min(1, 2.0 * closeness * dt);
+      }
+      if (d < safe) {
+        // Emergency push — gecko has overlapped, eject outward.
+        const push = (safe - d) * 0.6;
+        here.x += (dx / d) * push;
+        here.z += (dz / d) * push;
       }
     }
 
@@ -485,14 +568,25 @@ export function Gecko() {
 
     // Breathing bob — subtle vertical lift during freeze / look so
     // the gecko doesn't feel petrified. Disabled during dashes (the
-    // wiggle is doing the alive-work) and during orient (it's
-    // committing to a turn, body steady).
+    // wiggle + stride bob are doing the alive-work) and during
+    // orient (committing to a turn, body steady).
     const stillForBreath =
       modeRef.current !== 'dash' || orienting.current;
     const breathBob = stillForBreath
       ? Math.sin(elapsed.current * BREATH_HZ * Math.PI * 2) * BREATH_AMP
       : 0;
-    here.y = 0.025 + breathBob;
+    // Stride bob — vertical body bump synced to the gait. Each leg
+    // pair plant pushes the body up; the recover-and-swing phase
+    // lets it drop. Without this the gecko slides forward at a
+    // constant Y and reads as "swimming" instead of "walking".
+    // 2× wigglePhase because the body cycle is half the leg cycle
+    // (full leg cycle = one full bob — left-plant up + right-plant up).
+    const moving0 = modeRef.current === 'dash' && !orienting.current;
+    const strideBob = moving0
+      ? Math.abs(Math.sin(elapsed.current * (10.0 + currentSpeed.current * 2) * 0.6)) *
+        0.012
+      : 0;
+    here.y = 0.025 + breathBob + strideBob;
 
     // Smooth the body yaw — never assigned directly to the group.
     // Wrap-aware delta keeps the lerp going the short way around the
@@ -504,6 +598,23 @@ export function Gecko() {
     const yawStep = 1 - Math.exp(-BODY_YAW_RATE * dt);
     bodyYaw.current += yawDelta * yawStep;
     groupRef.current.rotation.y = bodyYaw.current;
+
+    // Arrival fade — scale up from 0 → 1 over ARRIVE_FADE_SEC after
+    // spawn so the new visit doesn't pop in. Outer group scale is
+    // already set to 1.6 in the JSX (we keep that base scale), so
+    // we multiply by an arrive factor that eases in.
+    if (arriveTimer.current < ARRIVE_FADE_SEC) {
+      arriveTimer.current += dt;
+      const f = THREE.MathUtils.clamp(
+        arriveTimer.current / ARRIVE_FADE_SEC,
+        0,
+        1,
+      );
+      const ease = f * f * (3 - 2 * f); // smoothstep
+      groupRef.current.scale.setScalar(1.6 * ease);
+    } else if (groupRef.current.scale.x !== 1.6) {
+      groupRef.current.scale.setScalar(1.6);
+    }
 
     // Head lead: when the body is still rotating toward the
     // kinematic heading (yawDelta non-zero), the head turns ahead
@@ -518,19 +629,29 @@ export function Gecko() {
 
     // ----- body wiggle, head idle micro-turn, blinks ---------------
     const moving = modeRef.current === 'dash' && !orienting.current;
-    // Wiggle freq scales with dash speed; freeze + orient hold still
-    // (a real lizard freezes completely). Look mode gets a tiny
-    // breathing sway only.
-    let wiggleFreq = 0;
+
+    // Distance walked this frame — drives the gait phase so leg
+    // cycle frequency = walk speed / stride. One full leg cycle per
+    // GAIT_STRIDE metres of travel; a slow dash has a slow gait, a
+    // fast dash has a brisk one, never paddling-in-place.
+    const dx = here.x - prevPos.current[0];
+    const dz = here.z - prevPos.current[1];
+    const stepDist = Math.hypot(dx, dz);
+    distanceWalked.current += stepDist;
+    prevPos.current[0] = here.x;
+    prevPos.current[1] = here.z;
+
+    // Gait phase keyed to distance for moving; freeze/look fall back
+    // to a slow time-driven idle so head + tail still micro-sway.
+    let wigglePhase = 0;
     let wiggleAmp = 0;
     if (moving) {
-      wiggleFreq = 10.0 + currentSpeed.current * 2;
+      wigglePhase = (distanceWalked.current / GAIT_STRIDE) * Math.PI * 2;
       wiggleAmp = 0.32;
     } else if (modeRef.current === 'look') {
-      wiggleFreq = 1.6;
+      wigglePhase = elapsed.current * 1.6;
       wiggleAmp = 0.03;
     }
-    const wigglePhase = elapsed.current * wiggleFreq;
     // Head additionally micro-turns randomly at rest (slow noise) —
     // but only when NOT in look mode (look already drives the head).
     const idleHeadNoise =
@@ -544,6 +665,31 @@ export function Gecko() {
         idleHeadNoise +
         headOffset +
         headLead;
+      // Head pitch bob — vertical micro-bob synced to the stride so
+      // the gecko "head-bobs" while walking. Half the body bob
+      // amplitude (~4mm angle equivalent) so it's noticeable but
+      // not exaggerated.
+      headRef.current.rotation.x = moving
+        ? Math.abs(Math.sin(wigglePhase)) * 0.18
+        : 0;
+    }
+
+    // Body S-bend wave — each segment is offset laterally (local X,
+    // perpendicular to body Z axis) by a phase-lagged sin. Wave
+    // propagates head-to-tail so the body reads as a snake-like
+    // ripple, not a rigid plank. Only active while moving; freeze
+    // returns segments to centreline.
+    const bodyWaveAmp = moving ? BODY_WAVE_AMP : 0;
+    if (bodyFrontRef.current) {
+      bodyFrontRef.current.position.x = Math.sin(wigglePhase) * bodyWaveAmp;
+    }
+    if (bodyMidRef.current) {
+      bodyMidRef.current.position.x =
+        Math.sin(wigglePhase - Math.PI * 0.6) * bodyWaveAmp;
+    }
+    if (bodyBackRef.current) {
+      bodyBackRef.current.position.x =
+        Math.sin(wigglePhase - Math.PI * 1.2) * bodyWaveAmp * 1.15;
     }
     if (tail1Ref.current) {
       tail1Ref.current.rotation.y =
@@ -559,15 +705,38 @@ export function Gecko() {
     }
 
     // Leg gait — diagonal trot pattern (FR+BL ↔ FL+BR alternate).
-    // Amplitude scales with realised speed so a fast dash shows
-    // bigger leg swings; freeze + look hold the legs steady.
+    // Swing amplitude (Y rotation) scales with realised speed.
+    // The LIFT (X rotation) only fires during the forward half of
+    // each leg's swing cycle so the leg visibly lifts off the sand,
+    // recovers forward, then plants back down. Without lift the
+    // animation was a pure lateral swing — legs slid sideways, not
+    // a walking gait.
+    const gaitPhase = wigglePhase * 0.6;
     const legSwing = moving
-      ? Math.sin(wigglePhase * 0.6) * (0.35 + currentSpeed.current * 0.08)
+      ? Math.sin(gaitPhase) * (0.35 + currentSpeed.current * 0.08)
       : 0;
-    if (legFRRef.current) legFRRef.current.rotation.y = legSwing;
-    if (legBLRef.current) legBLRef.current.rotation.y = legSwing;
-    if (legFLRef.current) legFLRef.current.rotation.y = -legSwing;
-    if (legBRRef.current) legBRRef.current.rotation.y = -legSwing;
+    // Lift envelope: positive half of sin lifts that pair, negative
+    // half plants the opposite pair. Using max(0, sin) gives a
+    // half-wave per pair.
+    const liftAmp = 0.55;
+    const liftAB = moving ? Math.max(0, Math.sin(gaitPhase)) * liftAmp : 0;
+    const liftCD = moving ? Math.max(0, -Math.sin(gaitPhase)) * liftAmp : 0;
+    if (legFRRef.current) {
+      legFRRef.current.rotation.y = legSwing;
+      legFRRef.current.rotation.x = liftAB;
+    }
+    if (legBLRef.current) {
+      legBLRef.current.rotation.y = legSwing;
+      legBLRef.current.rotation.x = liftAB;
+    }
+    if (legFLRef.current) {
+      legFLRef.current.rotation.y = -legSwing;
+      legFLRef.current.rotation.x = liftCD;
+    }
+    if (legBRRef.current) {
+      legBRRef.current.rotation.y = -legSwing;
+      legBRRef.current.rotation.x = liftCD;
+    }
 
     // Eye blink — occasional, very quick (~0.12s).
     nextBlinkAt.current -= dt;
@@ -625,14 +794,48 @@ export function Gecko() {
   return (
     <group ref={groupRef} visible={false} scale={1.6}>
       <group>
-        {/* body */}
-        <mesh geometry={bodyGeom} material={bodyMat} castShadow />
-        {/* belly tint */}
+        {/* body — 3 segments so the chassis can S-bend laterally
+            as the gecko walks. Each segment's X offset is driven
+            per-frame from a phase-lagged sin wave (see useFrame). */}
         <mesh
-          geometry={bodyGeom}
+          ref={bodyFrontRef}
+          geometry={bodyFrontGeom}
+          material={bodyMat}
+          position={[0, 0, 0.038]}
+          castShadow
+        />
+        <mesh
+          ref={bodyMidRef}
+          geometry={bodyMidGeom}
+          material={bodyMat}
+          position={[0, 0, 0]}
+          castShadow
+        />
+        <mesh
+          ref={bodyBackRef}
+          geometry={bodyBackGeom}
+          material={bodyMat}
+          position={[0, 0, -0.036]}
+          castShadow
+        />
+        {/* dorsal hump — flattened sphere over the mid segment for
+            a visible spine ridge. Lifts the silhouette from "flat
+            blob" to "low-slung lizard". */}
+        <mesh
+          geometry={dorsalGeom}
+          material={bodyMat}
+          position={[0, 0.018, 0]}
+          scale={[0.85, 0.55, 1.3]}
+        />
+        {/* belly tint — single piece spanning roughly the whole
+            body length; the lateral wave on the body segments
+            isn't carried by the belly, which is fine since the
+            belly is barely visible from iso. */}
+        <mesh
+          geometry={bodyMidGeom}
           material={bellyMat}
           position={[0, -0.011, 0]}
-          scale={[0.96, 0.55, 0.96]}
+          scale={[0.96, 0.55, 3.4]}
         />
         {/* head */}
         <mesh
