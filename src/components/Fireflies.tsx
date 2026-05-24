@@ -292,37 +292,58 @@ export function Fireflies() {
           }
         } else {
           // APPROACH + DESCEND — fly toward the stone, holding cruise
-          // altitude above it until the last ~30cm, then descend as
-          // we close in. No hard threshold, so the landing reads as
-          // a continuous deceleration arc instead of a snap.
+          // altitude above it until the last ~40cm, then descend as
+          // we close in. The descent rate slows as we get close so
+          // the touchdown reads as a gentle settle, and a small
+          // perpendicular wobble + Y bob keeps the path from
+          // looking like a vacuum cleaner sucking the firefly in.
           const targetHeading = Math.atan2(dz, dx);
           let dh = targetHeading - st.heading;
           while (dh > Math.PI) dh -= Math.PI * 2;
           while (dh < -Math.PI) dh += Math.PI * 2;
-          // Slower heading correction so the approach curves in like
-          // a real insect, not a guided missile.
-          st.heading += dh * Math.min(1, 3.5 * dt);
+          // Slower heading correction when close — the firefly
+          // wanders in rather than locking on. Far away it can turn
+          // briskly to actually face the stone.
+          const headingRate = 1.5 + (horizDist > 0.5 ? 2.0 : 0.5);
+          st.heading += dh * Math.min(1, headingRate * dt);
 
-          // Speed: scales linearly with horizDist down to ~5cm/s at
-          // very close range. Caps at 0.5 m/s for the cruise.
-          st.speed = THREE.MathUtils.clamp(horizDist * 1.3, 0.05, 0.50);
-          const vx = Math.cos(st.heading) * st.speed;
-          const vz = Math.sin(st.heading) * st.speed;
+          // Speed: scales with horizDist but capped much lower in the
+          // final 15cm so the firefly doesn't barrel into the stone.
+          const closeBrake = horizDist < 0.15 ? horizDist / 0.15 : 1.0;
+          st.speed =
+            THREE.MathUtils.clamp(horizDist * 1.1, 0.025, 0.45) * closeBrake;
+          // Tiny perpendicular wobble — sine-driven sideways drift so
+          // the approach line curves like a real insect compensating
+          // for air, not a straight ballistic vector.
+          const wobblePhase = time * 4.3 + st.x * 7;
+          const wobbleStrength = 0.18 * Math.min(1, horizDist * 2.5);
+          const headPerp = st.heading + Math.PI / 2;
+          const vx =
+            Math.cos(st.heading) * st.speed +
+            Math.cos(headPerp) * Math.sin(wobblePhase) * wobbleStrength;
+          const vz =
+            Math.sin(st.heading) * st.speed +
+            Math.sin(headPerp) * Math.sin(wobblePhase) * wobbleStrength;
           st.x += vx * dt;
           st.z += vz * dt;
 
-          // Dynamic Y target — when far the firefly cruises ~15cm
-          // above the stone; in the last 30cm it descends. The
-          // descent finishes naturally as approachT → 0.
+          // Dynamic Y target — when far the firefly cruises ~18cm
+          // above the stone; in the last 40cm it descends. A small
+          // sine bob layered on top so the descent doesn't read as
+          // a monotonic glide.
           const approachT = THREE.MathUtils.clamp(
-            (horizDist - 0.08) / 0.3,
+            (horizDist - 0.05) / 0.4,
             0,
             1,
           );
-          const dynamicTargetY = ty + 0.15 * approachT;
+          const yBob = Math.sin(time * 3.1 + st.z * 5) * 0.012 * approachT;
+          const dynamicTargetY = ty + 0.18 * approachT + yBob;
           // Y easing slows down as we get close — fast catch-up while
-          // cruising, gentle settle as we descend onto the stone.
-          const yRate = 1.6 + (1 - approachT) * 1.4;
+          // cruising (approachT=1 → rate 3.6), gentle settle on
+          // touch-down (approachT=0 → rate 1.4). This fixes the prior
+          // inverted formula which sped UP the descent at the end
+          // and read as the firefly being "sucked" onto the stone.
+          const yRate = 1.4 + approachT * 2.2;
           const yEase = 1 - Math.exp(-yRate * dt);
           st.y += (dynamicTargetY - st.y) * yEase;
           st.vy = 0;

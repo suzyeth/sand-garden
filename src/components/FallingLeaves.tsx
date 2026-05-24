@@ -2,6 +2,7 @@ import { useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { useStore } from '../sim/store';
+import { SAND_HALF } from '../sim/constants';
 
 /**
  * Drifting leaves / blossoms. Five independent particle slots, each
@@ -30,6 +31,12 @@ const DRIFT_DURATION: [number, number] = [10, 16];
 const SPAWN_RADIUS = 12;
 const ISO_CAM_X = 20;
 const ISO_CAM_Z = 20;
+// Leaves "land" at endPos, but the back/left walls sit at -SAND_HALF.
+// Without clamping, a leaf blowing toward the SW would settle on top
+// of (or behind) a wall, which reads wrong — leaves shouldn't pile
+// on the tile cap. Clamping endPos to LAND_INSET keeps every landing
+// firmly on visible sand.
+const LAND_INSET = SAND_HALF - 1.2;
 
 // Wind direction is no longer a static constant. We compute a base
 // angle plus a slow sine drift so the wind feels like it's gently
@@ -188,8 +195,20 @@ function DriftingParticle({ initialDelay }: { initialDelay: number }) {
     const endY = 0.05;
     const startX = -windUx * SPAWN_RADIUS + perpX * lat;
     const startZ = -windUz * SPAWN_RADIUS + perpZ * lat;
-    const endX = windUx * SPAWN_RADIUS + perpX * (lat + latDrift);
-    const endZ = windUz * SPAWN_RADIUS + perpZ * (lat + latDrift);
+    // Clamp the LANDING position so leaves don't pass through or
+    // settle on the back/left walls. The start position can stay
+    // outside (leaves drift in from off-camera), but where the leaf
+    // actually touches down must be on visible sand.
+    const endX = THREE.MathUtils.clamp(
+      windUx * SPAWN_RADIUS + perpX * (lat + latDrift),
+      -LAND_INSET,
+      LAND_INSET,
+    );
+    const endZ = THREE.MathUtils.clamp(
+      windUz * SPAWN_RADIUS + perpZ * (lat + latDrift),
+      -LAND_INSET,
+      LAND_INSET,
+    );
     flight.current = {
       startPos: [startX, startY, startZ],
       endPos: [endX, endY, endZ],

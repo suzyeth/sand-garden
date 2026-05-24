@@ -14,6 +14,11 @@ export type RobotState = 'IDLE' | 'RAKE' | 'SEEK_HOME' | 'DOCK';
 // Dragonflies only emerge during 'cloudy' (the still-warm pre-rain
 // lull). Rain particles render during 'rain' + tail of 'clearing'.
 export type Weather = 'clear' | 'cloudy' | 'rain' | 'clearing';
+// Per-rain intensity tier picked once when a 'rain' phase begins.
+// Drives drop count, streak length, fall speed, opacity, ambient
+// darkening, and rain audio gain so the three reads are clearly
+// different — not a single fixed visual.
+export type RainType = 'drizzle' | 'moderate' | 'heavy';
 
 type Store = {
   // robot
@@ -31,6 +36,15 @@ type Store = {
   // ramp-up/down so the system isn't a binary switch).
   weather: Weather;
   weatherIntensity: number;
+  // Active rain tier — only meaningful while weather === 'rain' or the
+  // tail of 'clearing'. Picked once per rain phase.
+  rainType: RainType;
+  // Debug overrides — when non-null, Weather.tsx bypasses its FSM
+  // and pins these values. Cycled by a HUD button so the user can
+  // jump straight to "heavy rain" for visual review without waiting
+  // for the natural cycle.
+  forceWeather: Weather | null;
+  forceRainType: RainType | null;
 
   // setters
   setBattery: (b: number) => void;
@@ -39,6 +53,9 @@ type Store = {
   setCycleT: (t: number) => void;
   setWeather: (w: Weather) => void;
   setWeatherIntensity: (i: number) => void;
+  setRainType: (r: RainType) => void;
+  setForceWeather: (w: Weather | null) => void;
+  setForceRainType: (r: RainType | null) => void;
   toggleGarden: () => void;
   toggleSound: () => void;
 };
@@ -52,6 +69,9 @@ export const useStore = create<Store>((set) => ({
   cycleT: 0.25, // start at noon
   weather: 'clear',
   weatherIntensity: 0,
+  rainType: 'moderate',
+  forceWeather: null,
+  forceRainType: null,
 
   setBattery: (battery) => set({ battery }),
   setState: (state) => set({ state }),
@@ -59,6 +79,9 @@ export const useStore = create<Store>((set) => ({
   setCycleT: (cycleT) => set({ cycleT }),
   setWeather: (weather) => set({ weather }),
   setWeatherIntensity: (weatherIntensity) => set({ weatherIntensity }),
+  setRainType: (rainType) => set({ rainType }),
+  setForceWeather: (forceWeather) => set({ forceWeather }),
+  setForceRainType: (forceRainType) => set({ forceRainType }),
   toggleGarden: () => set((s) => ({ showGarden: !s.showGarden })),
   // Side-effecting because the AudioContext must be (de)activated in
   // the same call stack as the user gesture that triggered the toggle.

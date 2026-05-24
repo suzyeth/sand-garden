@@ -22,6 +22,19 @@ const FLY_HEIGHT_MAX = 1.6;
 const DAY_T_MAX = 0.46;
 const DAY_T_FADE = 0.06; // last 0.06 of daytime fades out
 
+// Soft fade across the cloudy weather gate — entering ~2s in,
+// leaving ~3s out. Without this, dragonflies pop in/out the moment
+// the rain starts or stops, which reads as a glitch rather than a
+// natural retreat.
+const WEATHER_FADE_IN_RATE = 1 / 2.0;
+const WEATHER_FADE_OUT_RATE = 1 / 3.0;
+
+// Per-personality flight tuning. Picked once at mount so each
+// dragonfly behaves consistently. "patroller" prefers longer dashes
+// in straight lines; "hoverer" lingers more between movements.
+type Personality = 'hoverer' | 'patroller';
+const PERSONALITIES: Personality[] = ['hoverer', 'patroller'];
+
 function hash(seed: number): number {
   const s = Math.sin(seed * 12.9898) * 43758.5453;
   return s - Math.floor(s);
@@ -38,6 +51,7 @@ type Spec = {
   bodyColour: THREE.Color;
   wingTint: THREE.Color;
   wingBeat: number; // Hz
+  personality: Personality;
 };
 
 type FlyState = {
@@ -78,6 +92,7 @@ export function Dragonflies() {
         bodyColour: new THREE.Color(DRAGONFLY_COLOURS[i % DRAGONFLY_COLOURS.length]),
         wingTint: new THREE.Color(WING_TINTS[i % WING_TINTS.length]),
         wingBeat: 18 + hash(i * 5.7) * 12,
+        personality: PERSONALITIES[i % PERSONALITIES.length],
       })),
     [],
   );
@@ -143,6 +158,9 @@ export function Dragonflies() {
   const wingBRRef = useRef<(THREE.Mesh | null)[]>([]);
 
   const elapsed = useRef(0);
+  // Weather gate is now lerped instead of binary — 0 means hidden,
+  // 1 means fully present. Lerps in ~2s, out ~3s.
+  const weatherFade = useRef(0);
 
   useEffect(() => {
     // Apply per-dragonfly body colour once.
@@ -163,39 +181,63 @@ export function Dragonflies() {
     const state = useStore.getState();
     const t = state.cycleT;
     const w = dayWeight(t);
-    // Dragonflies only emerge in the pre-rain lull — when the
-    // weather state is 'cloudy'. Outside of that we keep them hidden,
-    // which makes their appearance feel like a weather signal.
-    const weatherGate = state.weather === 'cloudy';
+    // Soft weather gate — lerp toward 1 while cloudy, toward 0
+    // otherwise. The 2s/3s ramps come from the asymmetric rates.
+    const weatherTarget = state.weather === 'cloudy' ? 1 : 0;
+    const rate =
+      weatherTarget > weatherFade.current
+        ? WEATHER_FADE_IN_RATE
+        : WEATHER_FADE_OUT_RATE;
+    weatherFade.current = THREE.MathUtils.clamp(
+      weatherFade.current + (weatherTarget - weatherFade.current) * rate * dt * 3,
+      0,
+      1,
+    );
+    const presence = w * weatherFade.current;
 
     for (let i = 0; i < DRAGONFLY_COUNT; i++) {
       const g = groupRefs.current[i];
       if (!g) continue;
-      if (w <= 0.001 || !weatherGate) {
+      // Below this threshold the dragonfly is effectively invisible
+      // — skip the rest of the FSM update entirely.
+      if (presence < 0.01) {
         if (g.visible) g.visible = false;
         continue;
       }
       g.visible = true;
+      // Scale the whole group with presence so the fade reads as the
+      // dragonfly shrinking out of sight rather than a hard cut.
+      g.scale.setScalar(presence);
 
       const st = states[i];
       const sp = specs[i];
+      const isPatroller = sp.personality === 'patroller';
 
       // --- FSM ----------------------------------------------------
+      // Patroller: more darting, longer + faster, less hovering.
+      // Hoverer: more hovering, slower darts, more freeze time.
       st.nextDecisionIn -= dt;
       if (st.nextDecisionIn <= 0) {
         const r = Math.random();
-        if (r < 0.45) {
+        const hoverProb = isPatroller ? 0.28 : 0.6;
+        const dartProb = isPatroller ? 0.92 : 0.88;
+        if (r < hoverProb) {
           // hover with mild turning
-          st.speed = 0.02 + Math.random() * 0.08;
+          st.speed = (isPatroller ? 0.05 : 0.02) + Math.random() * 0.08;
           st.turnRate = (Math.random() - 0.5) * 1.2;
-          st.nextDecisionIn = 0.4 + Math.random() * 0.9;
-        } else if (r < 0.85) {
+          // Hoverer freezes longer between micro-movements.
+          const hold = isPatroller ? 0.3 : 0.8;
+          st.nextDecisionIn = hold + Math.random() * (isPatroller ? 0.5 : 1.1);
+        } else if (r < dartProb) {
           // dart in chosen direction
-          st.speed = 1.0 + Math.random() * 1.4;
+          st.speed =
+            (isPatroller ? 1.4 : 0.8) + Math.random() * (isPatroller ? 1.6 : 1.0);
           // Mostly straight darts; small heading change at start.
           st.heading += (Math.random() - 0.5) * 1.6;
           st.turnRate = (Math.random() - 0.5) * 0.4;
-          st.nextDecisionIn = 0.25 + Math.random() * 0.45;
+          // Patroller dashes are longer-lived.
+          const dur = isPatroller ? 0.45 : 0.25;
+          st.nextDecisionIn = dur + Math.random() * 0.45;
         } else {
           // sharp 90° turn while still moving
           st.speed = 0.4 + Math.random() * 0.6;

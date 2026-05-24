@@ -117,6 +117,10 @@ function SceneLighting() {
   const tmpA = useMemo(() => new THREE.Color(), []);
   const tmpB = useMemo(() => new THREE.Color(), []);
   const tmpC = useMemo(() => new THREE.Color(), []);
+  // Cool overcast tint used to nudge ambient toward grey-blue when it
+  // rains. Built once because lerp targets benefit from a stable
+  // reference rather than re-parsing the hex every tick.
+  const overcastTint = useMemo(() => new THREE.Color('#a4b4c4'), []);
 
   // Sky texture: 1x256 canvas. We KEEP the ctx + canvas around and
   // redraw the same texture, then flag needsUpdate, so the GPU sees a
@@ -215,16 +219,27 @@ function SceneLighting() {
       sky.texture.needsUpdate = true;
     }
 
+    // Weather darkening — read the smoothed intensity once and reuse
+    // for fog, dir, and amb so the ramp stays in lockstep.
+    const wIntensity = useStore.getState().weatherIntensity;
+
     // Fog — colour + near/far. Dawn is the only phase with thick
     // mist, so noon/dusk/night keyframes push the near/far out to
     // essentially-disabled values, and the cycle naturally crossfades
-    // the fog in around dawn.
+    // the fog in around dawn. Weather layers on top: rain pulls the
+    // far plane in toward the camera so distant garden edges grey out.
     const fog = scene.fog as THREE.Fog | null;
     if (fog) {
       tmpA.set(a.fog).lerp(tmpC.set(b.fog), u);
+      // Tint cooler when it's raining — a faint blue-grey wash.
+      tmpA.lerp(overcastTint, wIntensity * 0.35);
       fog.color.copy(tmpA);
-      fog.near = a.fogNear + (b.fogNear - a.fogNear) * u;
-      fog.far = a.fogFar + (b.fogFar - a.fogFar) * u;
+      const nearBase = a.fogNear + (b.fogNear - a.fogNear) * u;
+      const farBase = a.fogFar + (b.fogFar - a.fogFar) * u;
+      // Pull both planes in proportionally — heavy rain (1.0) halves
+      // the far distance; drizzle (0.35) barely changes it.
+      fog.near = nearBase * (1 - wIntensity * 0.35);
+      fog.far = farBase * (1 - wIntensity * 0.5);
     }
 
     // Lights — color + intensity only here. Position runs every frame
@@ -232,14 +247,21 @@ function SceneLighting() {
     if (dirLight.current) {
       tmpA.set(a.dirColor).lerp(tmpC.set(b.dirColor), u);
       dirLight.current.color.copy(tmpA);
-      dirLight.current.intensity =
-        a.dirIntensity + (b.dirIntensity - a.dirIntensity) * u;
+      const dirBase = a.dirIntensity + (b.dirIntensity - a.dirIntensity) * u;
+      // Heavy rain occludes the sun — knock the direct intensity
+      // down by up to 60% so the scene stops looking lit straight.
+      dirLight.current.intensity = dirBase * (1 - wIntensity * 0.6);
     }
     if (ambLight.current) {
       tmpA.set(a.ambColor).lerp(tmpC.set(b.ambColor), u);
+      // Push ambient toward cool grey under rain — the sky is the new
+      // light source, and overcast skies are not warm.
+      tmpA.lerp(overcastTint, wIntensity * 0.4);
       ambLight.current.color.copy(tmpA);
-      ambLight.current.intensity =
-        a.ambIntensity + (b.ambIntensity - a.ambIntensity) * u;
+      const ambBase = a.ambIntensity + (b.ambIntensity - a.ambIntensity) * u;
+      // Ambient drops less than direct — overcast is dimmer but still
+      // omnidirectional, so shadows soften rather than crushing.
+      ambLight.current.intensity = ambBase * (1 - wIntensity * 0.3);
     }
 
     // Drive day/night tone shift of the ambient music from the same

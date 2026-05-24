@@ -9,7 +9,11 @@ import { Robot } from './Robot';
 import { Butterfly } from './Butterfly';
 import { Dragonflies } from './Dragonflies';
 import { Gecko } from './Gecko';
+import { Frog } from './Frog';
+import { Sparrow } from './Sparrow';
+import { Beetle } from './Beetle';
 import { Weather } from './Weather';
+import { RainSplashes } from './RainSplashes';
 import { Periphery } from './Periphery';
 import { StoneLantern } from './StoneLantern';
 import { FallingLeaves } from './FallingLeaves';
@@ -35,8 +39,18 @@ export function Garden() {
       <Butterfly />
       <Dragonflies />
       <Gecko />
+      <Frog />
+      <Sparrow />
+      <Beetle />
       <Weather />
-      <StoneLantern position={[-5.8, 0, 5.4]} />
+      <RainSplashes />
+      {/* Stone lantern tucked against the SW back-wall corner —
+          diagonal opposite of the NE bamboo grove and pressed up
+          against the L of the back + left walls. Sitting against
+          the wall (~1m clearance) instead of free-standing in the
+          quadrant keeps the SW 'ma' (negative sand space) intact
+          while giving the lantern a structural anchor. */}
+      <StoneLantern position={[-6.5, 0, -6.5]} scale={1} />
       <Periphery />
       <FallingLeaves />
       <Fireflies />

@@ -6,75 +6,71 @@ what felt promising at the time."
 
 ---
 
-## Weather depth
+## Shipped (2026-05-24 sprint)
 
-### Rain intensity tiers
-Currently rain is one fixed visual. Split into three intensities:
-- **drizzle** — sparse particles, slow fall, light wetness
-- **rain** (current default)
-- **downpour** — dense particles, faster fall, stronger ambient drop, deeper sand darkening
+These were on the backlog and have since landed — kept here so a
+future-me grepping for the feature lands in the right place.
 
-State machine could pick one of three when entering `rain` phase, weighted by mood / season.
-
-### Rain audio
-`audio.ts` has the wind layer; add a rain layer. Filtered white noise + occasional patter samples. Volume scales with `weatherIntensity`.
-
-### Splash particles
-Tiny additive ring sprites that spawn briefly at random ground points during heavy rain. ~30-50 splashes pooled, recycle when fade ends. Maybe ~0.3s lifetime each.
-
-### Wet stones
-Stones currently keep their dry matte look during rain. Add a wetness-driven roughness drop + slight darkening to `Stones.tsx` material (similar to how `SandPlane.tsx` reads `uWetness` now). Wet stones should pick up a subtle specular highlight.
-
-### Ambient + fog tied to weather
-Right now ambient color and fog are driven only by `cycleT` (day/night keyframes). Layer a weather darkening on top:
-- `ambientLight.intensity *= (1 - weatherIntensity * 0.35)` during rain
-- `fog.near / fog.far` pulled inward during rain (~half their daytime values)
-- ambient color tinted cooler/grey when overcast
-
-Same pattern as wetness uniform: read `store.weatherIntensity` in `App.tsx`'s `useFrame`, multiply.
-
----
-
-## Charging dock redesign (garage feel)
-
-The robot currently parks **next** to the home stone (0.85m offset). User feedback: feels too casual, "碰一下就完事了".
-
-Options:
-- **Garage**: home stone becomes a taller open-front structure. Robot drives **into** the opening, stops inside. Visual cues: short approach ramp, two side walls, open front. Needs `DOCK_POS` re-computation in `Robot.tsx` and `HomeStone.tsx` redesign.
-- **Sunken slot**: a low rectangular depression in the engawa where the robot rolls down and parks; visible from iso angle as the robot "lowering" into the slot.
-- **Contact pads**: keep current park-beside model, but add two glowing bronze contact pads on the home stone's front face that pulse when robot is docked.
-
-Garage is the most expensive but the highest-impact for the "入库" feeling.
+- **Rain intensity tiers** — drizzle / moderate / heavy picked per
+  rain phase, drives drop count, streak length, fall speed, opacity,
+  splash density. `RAIN_PARAMS` in `Weather.tsx`; `RainType` in store.
+- **Rain audio** — band-passed noise rain layer in `audio.ts`, gain
+  driven by `setWeatherIntensity()` called from `Weather.tsx`.
+- **Splash particles** — `RainSplashes.tsx`, 48-instance pool, spawn
+  rate scales with intensity² × tier multiplier.
+- **Wet stones** — `Stones.tsx` injects `uWetness` uniform that
+  lowers roughness and tints cool. Driven from `store.weatherIntensity`.
+- **Ambient + fog tied to weather** — `SceneLighting` in `App.tsx`
+  multiplies dir/amb intensity and pulls fog planes by intensity.
+- **Cricket night chirps** — synthesised AM chirps in `audio.ts`,
+  scheduled while `nightWeight > 0.05`.
+- **Dragonfly soft fade + personalities** — `weatherFade` lerps the
+  group scale across the cloudy boundary; `Personality` ('hoverer'
+  vs 'patroller') biases FSM probabilities.
+- **Garage charging dock** — `HomeStone.tsx` redesigned as an open-
+  front bay (back + 2 sides + roof + floor pad + contact pads + back-
+  wall antenna). `DOCK_POS` shortened so the robot parks inside.
+- **Frog on moss** — `Frog.tsx`, sits on the central moss island,
+  hops occasionally, blinks, pulses subtly during rain.
+- **Sparrow** — `Sparrow.tsx`, Butterfly-style Catmull-Rom lifecycle,
+  tail wags during perch as the "song" cue.
+- **Beetle** — `Beetle.tsx`, slow sand-crossing walker, etches a thin
+  scrape behind it and disturbs rake grooves with smaller numbers
+  than the gecko.
 
 ---
 
-## Creatures
+## Weather depth (still open)
 
-### Crickets (night audio only)
-Pure audio addition — no visual. Layer in `audio.ts`:
-- gate on `cycleT > 0.55` (matches fireflies)
-- subtle chirp pattern, rate ~5/min
-- volume scales with night depth (peak ~0.75-0.85)
-Zero render cost, big atmospheric payoff.
+### Cinematic rain hits
+The current rain doesn't have lightning, distant thunder, or
+puddles. Adding any of them risks tipping the karesansui tone into
+something more theatrical — flag, don't implement, unless the user
+specifically asks.
 
-### Frog
-Sits on moss (home stone moss patch or central moss island). Occasional small hop (~10-15cm arc). Slow blink. Croaks during rain (audio). Day visibility, more active in `cloudy` weather.
-
-### Sparrow / wagtail
-Same lifecycle pattern as `Butterfly.tsx`: arrives from off-frame via Catmull-Rom, perches on a stone, sings briefly, departs. Smaller appearance interval than butterfly so it's a quieter event.
-
-### Beetle
-Slow walker on sand. Same etch + scuff pattern as Gecko but much slower and smaller. Visit cycle similar to Gecko but rarer.
+### Rain on stone vs sand differentiation
+Splashes currently land identically on sand and stone. A pass-through
+to spawn slightly bigger splashes (and a brief specular highlight)
+when a drop hits a stone would read as the patter being heard
+correctly, not as one uniform field.
 
 ---
 
-## Dragonfly polish
+## Creatures (still open)
 
-### Softer fade at the cloudy → rain boundary
-Currently dragonflies are visibility-gated on `weather === 'cloudy'` as a hard boolean. Once rain starts, they pop out instantly. Better: ease out over ~3 seconds when leaving cloudy, ease in over ~2 seconds when entering. Add `dragonflyFade` ref that lerps toward target.
+### Frog croak audio
+The frog visual is in (`Frog.tsx`) and pulses subtly during rain as
+a vocal-sac suggestion, but there's no actual audio. Add a frog
+croak layer in `audio.ts` — synthesised low burst on a triangle
+oscillator with quick decay, gated on `weather === 'rain'` and
+fired at ~12-20s intervals.
 
-### Different individual flight patterns
-All current dragonflies share the same hover/dart FSM. Differentiate: one "patroller" (longer dashes), one "hoverer" (more freeze time). Adds character without adding count.
+### More creature variety
+With frog + sparrow + beetle in, the day cast is full. Next batch
+ideas: a koi shadow under the central moss island (only visible at
+midday angles), or a snail with an extra-long etch trail. Don't add
+more flying things — the air is already busy with butterfly +
+dragonflies + sparrow.
 
 ---
 

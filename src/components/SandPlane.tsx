@@ -67,6 +67,10 @@ export function SandPlane() {
   const heightTexture = sandField.texture;
   const simAcc = useRef(0);
   const bgEnabledUniform = useRef<{ value: number }>({ value: 1.0 });
+  // Puddle amount — 0 = dry sand, 1 = visible standing water patches.
+  // Only ramps up during moderate / heavy rain (drizzle stays dry);
+  // decays slowly after rain stops, mirroring the wetness behaviour.
+  const puddleUniform = useRef<{ value: number }>({ value: 0.0 });
   // Wetness drives a darker / damper sand look during and after rain.
   // Lives as a ref to avoid re-rendering the React tree every frame.
   const wetnessUniform = useRef<{ value: number }>({ value: 0.0 });
@@ -91,13 +95,28 @@ export function SandPlane() {
     // Wetness lags behind weather intensity so the sand looks "still
     // damp" after the rain stops, then slowly dries. Charge up fast
     // during rain, decay slowly after.
-    const wi = useStore.getState().weatherIntensity;
+    const state = useStore.getState();
+    const wi = state.weatherIntensity;
     const cur = wetnessUniform.current.value;
     const target = wi;
     // Different attack vs decay rates — quick to wet, slow to dry.
     const rate = target > cur ? 0.9 : 0.18;
     const ease = 1 - Math.exp(-rate * dt);
     wetnessUniform.current.value = cur + (target - cur) * ease;
+
+    // Puddles — only form during moderate/heavy rain, and only when
+    // the rain has actually been going for a while (intensity²). The
+    // decay rate is even slower than wetness — puddles outlast the
+    // rain by a noticeable margin before fully drying.
+    const puddleEligible =
+      state.weather === 'rain' &&
+      (state.rainType === 'moderate' || state.rainType === 'heavy');
+    const puddleTier = state.rainType === 'heavy' ? 1.0 : 0.55;
+    const puddleTarget = puddleEligible ? wi * wi * puddleTier : 0;
+    const pCur = puddleUniform.current.value;
+    const pRate = puddleTarget > pCur ? 0.35 : 0.10;
+    const pEase = 1 - Math.exp(-pRate * dt);
+    puddleUniform.current.value = pCur + (puddleTarget - pCur) * pEase;
   });
 
   /**
@@ -137,6 +156,7 @@ export function SandPlane() {
       // recompile.
       shader.uniforms.uBgEnabled = bgEnabledUniform.current;
       shader.uniforms.uWetness = wetnessUniform.current;
+      shader.uniforms.uPuddleAmount = puddleUniform.current;
       shader.uniforms.uStonePos = {
         value: SHADER_STONES.map(
           (s) => new THREE.Vector2(s.pos[0], s.pos[1]),
@@ -175,6 +195,7 @@ vSandUv = uv;`,
         `#include <common>
 uniform sampler2D uSandData;
 uniform float uWetness;
+uniform float uPuddleAmount;
 uniform float uTexel;
 uniform float uShadingAmp;
 uniform float uShadingMin;
@@ -282,7 +303,48 @@ vec3 sandColor = diffuse * colorMul;
 float depthBoost = 1.0 + d * 0.4;
 vec3 wetSandColor = sandColor * vec3(0.45, 0.45, 0.50);
 sandColor = mix(sandColor, wetSandColor, clamp(uWetness * depthBoost, 0.0, 1.0));
+
+// Puddles — visible only at moderate/heavy rain (uPuddleAmount > 0).
+// Two-octave low-frequency hash noise selects irregular patches;
+// patches form where the noise exceeds a threshold that lowers as
+// rain intensifies, so more puddles appear in heavier rain. Each
+// puddle darkens significantly and shifts the tone toward cool
+// water-blue. Existing rake grooves act as drainage — depth d
+// bumps the puddle weight so puddles preferentially form in low
+// areas, like real water finding the lowest point.
+float p1 = hash21(worldXZ * 0.55);
+float p2 = hash21(worldXZ * 1.7 + 11.0);
+float puddleNoise = p1 * 0.6 + p2 * 0.4;
+// Bias the threshold by uPuddleAmount AND by groove depth — at full
+// amount, threshold drops to ~0.35 so a lot of area is puddle.
+float puddleThreshold = mix(0.95, 0.35, uPuddleAmount) - d * 0.2;
+float puddleMask = smoothstep(puddleThreshold, puddleThreshold + 0.08, puddleNoise);
+puddleMask *= uPuddleAmount;
+vec3 puddleColor = sandColor * vec3(0.22, 0.26, 0.32);
+sandColor = mix(sandColor, puddleColor, puddleMask);
+
 vec4 diffuseColor = vec4(sandColor, opacity);`,
+      );
+      // Lower roughness inside puddle areas — water surface is
+      // much smoother than sand. The roughnessmap slot fires after
+      // the diffuse calc so puddleMask is already computed above;
+      // we recompute the same mask here (cheap) to drive the
+      // roughness factor. Puddle areas get roughness ~0.25, which
+      // with the default lighting setup reads as standing water.
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <roughnessmap_fragment>',
+        `#include <roughnessmap_fragment>
+{
+  vec2 _pXZ = vec2((vSandUv.x - 0.5) * uSandWorldSize,
+                   (0.5 - vSandUv.y) * uSandWorldSize);
+  float _p1 = hash21(_pXZ * 0.55);
+  float _p2 = hash21(_pXZ * 1.7 + 11.0);
+  float _pn = _p1 * 0.6 + _p2 * 0.4;
+  float _pd = texture2D(uSandData, vSandUv).r;
+  float _pth = mix(0.95, 0.35, uPuddleAmount) - _pd * 0.2;
+  float _pm = smoothstep(_pth, _pth + 0.08, _pn) * uPuddleAmount;
+  roughnessFactor = mix(roughnessFactor, 0.22, _pm);
+}`,
       );
     };
 

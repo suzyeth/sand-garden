@@ -1,6 +1,8 @@
-import { useMemo } from 'react';
+import { useMemo, useRef } from 'react';
+import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { STONES } from '../sim/stones';
+import { useStore } from '../sim/store';
 
 /**
  * Five zen stones placed in an asymmetric karesansui composition.
@@ -46,6 +48,11 @@ function buildRoughStoneGeometry(seed: number): THREE.BufferGeometry {
 }
 
 export function Stones() {
+  // Shared uniform for wetness so a single ref updates every stone
+  // instance at once. We can't use a closure variable because R3F
+  // recreates onBeforeCompile only on first compile.
+  const wetnessUniformRef = useRef({ value: 0 });
+
   const material = useMemo(() => {
     const m = new THREE.MeshStandardMaterial({
       color: '#5a5650',
@@ -54,6 +61,7 @@ export function Stones() {
     });
 
     m.onBeforeCompile = (shader) => {
+      shader.uniforms.uWetness = wetnessUniformRef.current;
       shader.vertexShader = shader.vertexShader.replace(
         '#include <common>',
         `#include <common>
@@ -70,6 +78,7 @@ vStoneWorld = _stoneWorld.xyz;`,
         '#include <common>',
         `#include <common>
 varying vec3 vStoneWorld;
+uniform float uWetness;
 
 float stoneHash21(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
@@ -93,11 +102,36 @@ diffuseColor.rgb = mix(
   diffuseColor.rgb,
   diffuseColor.rgb * vec3(0.78, 1.05, 0.72),
   moss * 0.4
+);
+// Wet stones — darken the diffuse and pick up a cool cast. The
+// roughness drop happens in the roughness slot below, which is what
+// actually produces the specular highlight; this just gives the wet
+// stones the right base colour.
+diffuseColor.rgb *= 1.0 - uWetness * 0.22;
+diffuseColor.rgb = mix(
+  diffuseColor.rgb,
+  diffuseColor.rgb * vec3(0.92, 0.96, 1.04),
+  uWetness * 0.5
 );`,
+      );
+      // Lower the roughness when wet so the specular highlight pops.
+      // Floor at 0.58 (down from dry 0.9): wet stone reads damp, not
+      // lacquered. The previous floor of 0.35 was glassy/plastic on
+      // heavy rain — granite never gets THAT shiny in reality.
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <roughnessmap_fragment>',
+        `#include <roughnessmap_fragment>
+roughnessFactor = mix(roughnessFactor, 0.58, uWetness);`,
       );
     };
     return m;
   }, []);
+
+  // Drive uWetness from the weather store. Cheap — single uniform
+  // write per frame, no GPU buffer rebuild.
+  useFrame(() => {
+    wetnessUniformRef.current.value = useStore.getState().weatherIntensity;
+  });
 
   // Build one displaced geometry per stone so each has a distinct
   // silhouette. Memoised so we don't rebuild on every render.

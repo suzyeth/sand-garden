@@ -49,6 +49,35 @@ const WIND_FILTER_BASE_HZ = 550;
 const WIND_LFO_DEPTH_HZ = 240;
 const WIND_LFO_RATE_HZ = 0.08; // ~12s per gust cycle
 
+// Rain layer — same buffer approach as wind but band-passed in the
+// "patter" range (2-4kHz) so it reads as actual rain on hard surfaces
+// rather than a wind hiss. Gain is driven by setWeatherIntensity so
+// the audio crossfades exactly with the visual rain ramp.
+const RAIN_GAIN_PEAK = 0.18;
+const RAIN_FILTER_HZ = 2800;
+const RAIN_FILTER_Q = 0.7;
+
+// Cricket layer — short tonal chirps gated on cycleT > 0.55 (matches
+// fireflies). Synthesised as quick AM bursts on a sine oscillator so
+// no asset is needed.
+// 2900Hz reads as a real cricket (their resonant peak is ~2-5kHz)
+// without the digital "beep" sharpness the original 4200Hz had on
+// thinner speakers. A low-pass at ~5kHz on the master chain would
+// catch any harmonic leakage; for now the sine carrier is clean
+// enough that we don't need an explicit filter.
+const CRICKET_BASE_HZ = 2900;
+const CRICKET_CHIRP_INTERVAL_MIN = 4.5; // seconds between chirps
+const CRICKET_CHIRP_INTERVAL_MAX = 11;
+const CRICKET_PEAK_GAIN = 0.035;
+
+// Frog croak — triggered while weather === 'rain', interval 12-20s.
+// Low triangle wave at ~175Hz with quick exp decay; doubled pulse
+// so each croak reads as the characteristic two-syllable "ribbit".
+const FROG_BASE_HZ = 175;
+const FROG_CROAK_INTERVAL_MIN = 12;
+const FROG_CROAK_INTERVAL_MAX = 20;
+const FROG_PEAK_GAIN = 0.07;
+
 class AmbientAudio {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
@@ -57,6 +86,22 @@ class AmbientAudio {
   private windFilter: BiquadFilterNode | null = null;
   private windGain: GainNode | null = null;
   private windLfo: OscillatorNode | null = null;
+  // Rain layer nodes — built lazily on first weather > 0 push.
+  private rainSource: AudioBufferSourceNode | null = null;
+  private rainFilter: BiquadFilterNode | null = null;
+  private rainGain: GainNode | null = null;
+  // Cricket scheduler — a scheduling loop ticks on cycleT updates and
+  // queues a chirp burst when the next-chirp clock elapses.
+  private cricketNext = 0; // ctx.currentTime of next chirp
+  private cricketTimer: ReturnType<typeof setInterval> | null = null;
+  // Frog scheduler — single shared timer with the cricket loop in
+  // practice (driven by the same setInterval); croaks fire only
+  // when isRaining is true.
+  private frogNext = 0; // ctx.currentTime of next croak
+  private isRaining = false;
+  // Most recent night weight (0 day, 1 deep night) so the cricket
+  // scheduler can scale chirp gain without an extra setter.
+  private nightWeight = 0;
   // Multiplier on top of MASTER_BASE driven by time-of-day. Held as a
   // ref-like number so setSpeedNorm and setTimeOfDay can both push at
   // it without fighting an automation race.
@@ -167,6 +212,161 @@ class AmbientAudio {
   }
 
   /**
+   * Synthesised rain — band-passed white noise. Same lazy-init pattern
+   * as wind: build once, leave running, control via gain.
+   */
+  private startRainIfNeeded(): void {
+    if (!this.ctx || !this.master || this.rainSource) return;
+    const sr = this.ctx.sampleRate;
+    const buf = this.ctx.createBuffer(1, sr * 4, sr);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+
+    const source = this.ctx.createBufferSource();
+    source.buffer = buf;
+    source.loop = true;
+
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = RAIN_FILTER_HZ;
+    filter.Q.value = RAIN_FILTER_Q;
+
+    const gain = this.ctx.createGain();
+    gain.gain.value = 0; // ramp up via setWeatherIntensity
+
+    source.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.master);
+
+    source.start();
+
+    this.rainSource = source;
+    this.rainFilter = filter;
+    this.rainGain = gain;
+  }
+
+  /**
+   * Cricket scheduler — fires brief AM bursts at random intervals
+   * while the night weight is non-zero. Building the oscillator + env
+   * graph per chirp is fine here: chirps are infrequent (~5-12s
+   * apart) and the graph is small.
+   */
+  private startCricketSchedulerIfNeeded(): void {
+    if (!this.ctx || !this.master || this.cricketTimer) return;
+    // Initialise both schedulers relative to ctx clock so the first
+    // chirp / croak fires within a reasonable window after enable().
+    this.cricketNext = this.ctx.currentTime + 2.5;
+    this.frogNext = this.ctx.currentTime + 6;
+    this.cricketTimer = setInterval(() => {
+      if (!this.ctx || !this.master || !this.enabled) return;
+      const now = this.ctx.currentTime;
+      // Crickets — only at night.
+      if (this.nightWeight >= 0.05 && now >= this.cricketNext) {
+        this.scheduleChirpBurst(now);
+        this.cricketNext =
+          now +
+          CRICKET_CHIRP_INTERVAL_MIN +
+          Math.random() *
+            (CRICKET_CHIRP_INTERVAL_MAX - CRICKET_CHIRP_INTERVAL_MIN);
+      }
+      // Frog croaks — only while it's raining. Independent timing
+      // so a single midnight rainstorm gets BOTH crickets + frogs.
+      if (this.isRaining && now >= this.frogNext) {
+        this.scheduleFrogCroak(now);
+        this.frogNext =
+          now +
+          FROG_CROAK_INTERVAL_MIN +
+          Math.random() *
+            (FROG_CROAK_INTERVAL_MAX - FROG_CROAK_INTERVAL_MIN);
+      }
+    }, 250);
+  }
+
+  /**
+   * Schedule a single chirp burst: 4-6 short pulses on a sine
+   * oscillator with quick attack/decay, slightly detuned per chirp
+   * so consecutive bursts don't feel identical.
+   */
+  private scheduleChirpBurst(start: number): void {
+    if (!this.ctx || !this.master) return;
+    const detune = (Math.random() - 0.5) * 220;
+    const freq = CRICKET_BASE_HZ + detune;
+    const peak = CRICKET_PEAK_GAIN * (0.6 + 0.4 * this.nightWeight);
+    const pulseCount = 4 + Math.floor(Math.random() * 3); // 4-6
+    const pulseDur = 0.028;
+    const pulseGap = 0.07;
+    for (let p = 0; p < pulseCount; p++) {
+      const t = start + p * (pulseDur + pulseGap);
+      const osc = this.ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = freq + (p % 2 === 0 ? 0 : 60);
+      const env = this.ctx.createGain();
+      env.gain.setValueAtTime(0, t);
+      env.gain.linearRampToValueAtTime(peak, t + 0.005);
+      env.gain.exponentialRampToValueAtTime(0.0001, t + pulseDur);
+      osc.connect(env);
+      env.connect(this.master);
+      osc.start(t);
+      osc.stop(t + pulseDur + 0.01);
+    }
+  }
+
+  /**
+   * Schedule a single frog croak — two short pulses on a triangle
+   * carrier at ~175Hz, second pulse slightly higher. Each pulse has
+   * an exp decay envelope so the croak reads as a chesty "ribbit"
+   * rather than a digital beep.
+   */
+  private scheduleFrogCroak(start: number): void {
+    if (!this.ctx || !this.master) return;
+    const pulseCount = 2;
+    const pulseDur = 0.16;
+    const pulseGap = 0.08;
+    for (let p = 0; p < pulseCount; p++) {
+      const t = start + p * (pulseDur + pulseGap);
+      const osc = this.ctx.createOscillator();
+      osc.type = 'triangle';
+      // Second syllable a touch higher — characteristic of real
+      // frog croaks (and reads less monotonous than two identical
+      // pulses).
+      osc.frequency.value = FROG_BASE_HZ * (p === 0 ? 1 : 1.18);
+      const env = this.ctx.createGain();
+      env.gain.setValueAtTime(0, t);
+      env.gain.linearRampToValueAtTime(FROG_PEAK_GAIN, t + 0.02);
+      env.gain.exponentialRampToValueAtTime(0.0005, t + pulseDur);
+      osc.connect(env);
+      env.connect(this.master);
+      osc.start(t);
+      osc.stop(t + pulseDur + 0.02);
+    }
+  }
+
+  /**
+   * Toggle the frog croak scheduler from the Weather component. The
+   * scheduler ticks regardless, but only fires while this flag is
+   * true so croaks are gated to rainy periods only.
+   */
+  setIsRaining(r: boolean): void {
+    this.isRaining = r;
+  }
+
+  /**
+   * Drive the rain layer gain from the smoothed weather intensity.
+   * Lazy-initialised so we don't build the synth nodes until the
+   * first time the player actually hears rain.
+   */
+  setWeatherIntensity(i: number): void {
+    if (!this.enabled || !this.ctx || !this.master) return;
+    this.startRainIfNeeded();
+    if (!this.rainGain) return;
+    const clamped = Math.max(0, Math.min(1, i));
+    // Square the intensity so drizzle is quietly audible and heavy
+    // dominates; matches the way the visuals scale.
+    const target = RAIN_GAIN_PEAK * clamped * clamped;
+    this.rainGain.gain.setTargetAtTime(target, this.ctx.currentTime, 0.6);
+  }
+
+  /**
    * Start playback. MUST be invoked from a user-gesture handler the
    * very first time, otherwise the AudioContext stays suspended.
    */
@@ -212,6 +412,9 @@ class AmbientAudio {
 
     // Wind layer — lazy build once, then stays alive.
     this.startWindIfNeeded();
+    // Cricket scheduler — starts ticking; chirps only fire while
+    // nightWeight is non-trivial, so daytime enables are silent.
+    this.startCricketSchedulerIfNeeded();
 
     // Snap gain directly. We avoid a gain ramp here because the Suno
     // tracks already fade themselves in via the skipped intro, and
@@ -234,6 +437,16 @@ class AmbientAudio {
       this.ctx.currentTime,
       FADE_OUT_SEC / 3,
     );
+    // Mute the rain layer too — the master fade muffles it, but
+    // ducking rainGain explicitly means it doesn't pop back at full
+    // volume on the next enable() if intensity is still high.
+    if (this.rainGain) {
+      this.rainGain.gain.setTargetAtTime(
+        0,
+        this.ctx.currentTime,
+        FADE_OUT_SEC / 3,
+      );
+    }
   }
 
   /**
@@ -276,6 +489,10 @@ class AmbientAudio {
     const gainMul =
       TIME_GAIN_NIGHT + (TIME_GAIN_DAY - TIME_GAIN_NIGHT) * daylight;
     this.timeGain = gainMul;
+    // 0 in full daylight, 1 in deep night — used by the cricket
+    // scheduler to gate + scale chirp gain. Same shape as the
+    // dragonfly gate but inverted.
+    this.nightWeight = 1 - daylight;
     this.tone.frequency.setTargetAtTime(hz, this.ctx.currentTime, 1.2);
     // The actual master.gain update is handled by setSpeedNorm in
     // the next animation tick — it multiplies by this.timeGain so the

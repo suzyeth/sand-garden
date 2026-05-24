@@ -1,6 +1,26 @@
 import { useEffect, useMemo, useRef } from 'react';
+import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { SAND_HALF } from '../sim/constants';
+import { useStore } from '../sim/store';
+
+/**
+ * Shared wind uniforms — both the cane shader and the leaf shader
+ * read these. Module-scope so cloned cane materials (one per cane,
+ * see notes in caneBaseMat) automatically pick up the SAME ref
+ * during their onBeforeCompile pass.
+ *
+ *   uTime         — seconds, monotonically increasing
+ *   uWindStrength — 0..~1.6, base ~0.9, ramps with gusts + weather
+ *   uWindDir      — unit vector in world XZ; matches the rain wind
+ *                   direction so rain + bamboo read as the same air
+ *                   moving through the scene
+ */
+const WIND_UNIFORMS = {
+  uTime: { value: 0 },
+  uWindStrength: { value: 0.9 },
+  uWindDir: { value: new THREE.Vector2(0.97, 0.24) },
+};
 
 /**
  * Small ornamental clusters tucked into the corners of the sand
@@ -72,13 +92,19 @@ const BAMBOO_CLUSTERS: Array<{
   count: number;
   clumpRadius: number;
 }> = [
-  // Main NE cluster — biggest grove (kept where it was).
-  { center: [5.4, 5.4], count: 24, clumpRadius: 1.3 },
+  // Main grove — pressed tight against the left wall. Centre at
+  // x=-6.9 with clumpRadius 0.85 puts the outermost cane at
+  // x=-7.75 (edge at -7.79), basically kissing the wall's inner
+  // face at -7.78 without clipping. Cluster is now ~30% narrower
+  // than before but visibly leans on the wall the way a real
+  // bamboo screen does. Z=4.0 keeps clearance from Stone[1] and
+  // the NW dwarf-shrub pile.
+  { center: [-6.9, 4.0], count: 16, clumpRadius: 0.85 },
   // SE wall-hugging satellites — one pressed against the back wall
   // (negative Z edge), one against the right engawa (positive X
   // edge). The home stone sits in between them.
-  { center: [3.0, -6.8], count: 10, clumpRadius: 0.7 },
-  { center: [6.8, -3.5], count: 8, clumpRadius: 0.65 },
+  { center: [3.0, -6.8], count: 7, clumpRadius: 0.7 },
+  { center: [6.8, -3.5], count: 5, clumpRadius: 0.65 },
 ];
 
 const BAMBOO_LIGHT = new THREE.Color('#a5b97c');
@@ -379,10 +405,13 @@ export function Periphery() {
   );
 
   const leafTexture = useMemo(() => buildLeafTexture(), []);
-  const leafGeom = useMemo(() => new THREE.PlaneGeometry(1, 1, 1, 1), []);
+  // PlaneGeometry with extra Y subdivisions so the wind displacement
+  // bends along the leaf instead of just translating it. 1×8 is
+  // enough resolution for a smooth curve at iso scale.
+  const leafGeom = useMemo(() => new THREE.PlaneGeometry(1, 1, 1, 8), []);
   const leafMat = useMemo(
-    () =>
-      new THREE.MeshStandardMaterial({
+    () => {
+      const m = new THREE.MeshStandardMaterial({
         map: leafTexture,
         color: '#8aa760',
         side: THREE.DoubleSide,
@@ -390,7 +419,69 @@ export function Periphery() {
         alphaTest: 0.45,
         roughness: 0.85,
         depthWrite: true,
-      }),
+      });
+      m.onBeforeCompile = (shader) => {
+        // Same shared uniforms as the cane shader — leaves flutter on
+        // the same wind, just with a higher base frequency + smaller
+        // amplitude so they read as light tip motion, not whole-leaf
+        // swing.
+        shader.uniforms.uTime = WIND_UNIFORMS.uTime;
+        shader.uniforms.uWindStrength = WIND_UNIFORMS.uWindStrength;
+        shader.uniforms.uWindDir = WIND_UNIFORMS.uWindDir;
+        shader.vertexShader = shader.vertexShader.replace(
+          '#include <common>',
+          `#include <common>
+uniform float uTime;
+uniform float uWindStrength;
+uniform vec2 uWindDir;`,
+        );
+        // Apply the wind displacement AFTER the standard transformed
+        // is built — bypass three.js's later morph/skin/displacement
+        // includes by piggybacking on <project_vertex>, which uses
+        // `transformed` and turns it into `mvPosition`. We add a
+        // world-space tip offset then convert into view space via
+        // the standard viewMatrix uniform.
+        shader.vertexShader = shader.vertexShader.replace(
+          '#include <project_vertex>',
+          `// World position of this vertex BEFORE wind displacement.
+vec4 _leafWorld = modelMatrix * vec4(transformed, 1.0);
+// position.y is the plane's local Y in [-0.5, +0.5]; the leaf is
+// anchored at -0.5 (base, at branchlet tip) and extends to +0.5
+// (free tip). tipWeight 0 at base, 1 at tip — quadratic so most of
+// the flutter shows in the upper half.
+float tipWeight = clamp(position.y + 0.5, 0.0, 1.0);
+tipWeight = tipWeight * tipWeight;
+// Coherent base phase (same uTime base as the canes) plus a small
+// per-leaf offset so leaves don't move in lock-step but still
+// share the gust. When uWindStrength is near 0 (calm), amp goes
+// to 0 and leaves hold position.
+float leafOffset = _leafWorld.x * 0.6 + _leafWorld.z * 0.45;
+float leafPhase = uTime * 4.5 + leafOffset;
+float fineFlutter = sin(leafPhase) * 0.5 + sin(leafPhase * 1.7 + 1.1) * 0.5;
+float amp = uWindStrength * 0.05 * tipWeight;
+vec2 windPerp = vec2(-uWindDir.y, uWindDir.x);
+vec3 windOffset = vec3(
+  uWindDir.x * fineFlutter * amp + windPerp.x * sin(leafPhase * 0.4) * amp * 0.5,
+  // Small vertical lift on gusts — leaves lift slightly when the
+  // wind pushes them, then settle back. Keeps the flutter from
+  // being a flat XZ wiggle.
+  abs(fineFlutter) * amp * 0.35,
+  uWindDir.y * fineFlutter * amp + windPerp.y * sin(leafPhase * 0.4) * amp * 0.5
+);
+// Transform world-space offset into view space and add to
+// mvPosition, which is what <project_vertex> normally builds.
+vec4 mvPosition = vec4(transformed, 1.0);
+#ifdef USE_INSTANCING
+mvPosition = instanceMatrix * mvPosition;
+#endif
+mvPosition = modelViewMatrix * mvPosition;
+mvPosition.xyz += (viewMatrix * vec4(windOffset, 0.0)).xyz;
+gl_Position = projectionMatrix * mvPosition;`,
+        );
+      };
+      m.customProgramCacheKey = () => 'sand-garden-leaf-v3-gust';
+      return m;
+    },
     [leafTexture],
   );
 
@@ -504,11 +595,20 @@ export function Periphery() {
       metalness: 0.05,
     });
     m.onBeforeCompile = (shader) => {
+      // Bind shared wind uniforms — same refs every clone picks up,
+      // so a single useFrame writing WIND_UNIFORMS.uTime.value moves
+      // every cane in lockstep without per-cane bookkeeping.
+      shader.uniforms.uTime = WIND_UNIFORMS.uTime;
+      shader.uniforms.uWindStrength = WIND_UNIFORMS.uWindStrength;
+      shader.uniforms.uWindDir = WIND_UNIFORMS.uWindDir;
       shader.vertexShader = shader.vertexShader.replace(
         '#include <common>',
         `#include <common>
 varying vec3 vCaneWorld;
-varying float vCaneYFrac;`,
+varying float vCaneYFrac;
+uniform float uTime;
+uniform float uWindStrength;
+uniform vec2 uWindDir;`,
       );
       shader.vertexShader = shader.vertexShader.replace(
         '#include <begin_vertex>',
@@ -546,6 +646,24 @@ float scaleXZ = length(modelMatrix[0].xyz);
 vec2 bendOffset = (scaleXZ > 0.0001) ? (curveDir * curveAmp / scaleXZ) : vec2(0.0);
 transformed.x += bendOffset.x;
 transformed.z += bendOffset.y;
+
+// Wind sway — adds a time-varying offset on top of the static bend.
+// Amplitude grows as yFrac^2.2 so the base stays planted while the
+// top whips around. Phase is GLOBAL (driven by uTime alone) with a
+// tiny per-cane offset from curveSeed — coherent so the grove
+// sways as one when a gust hits, not as a chaotic field of solo
+// pendulums. uWindStrength drops to ~0 between gusts (see the
+// gust scheduler in Periphery's useFrame), so this whole term
+// effectively turns off during calm periods.
+float windEnv = pow(max(0.0, yFrac), 2.2);
+float windPhase = uTime * 1.6 + curveSeed * 0.18;
+float windAmp = uWindStrength * 0.16 * windEnv;
+vec2 windPerp = vec2(-uWindDir.y, uWindDir.x);
+vec2 windOffset = uWindDir * sin(windPhase) * windAmp
+                + windPerp * sin(windPhase * 0.61 + 1.7) * windAmp * 0.25;
+vec2 windScaled = (scaleXZ > 0.0001) ? (windOffset / scaleXZ) : vec2(0.0);
+transformed.x += windScaled.x;
+transformed.z += windScaled.y;
 
 vec4 _cw = modelMatrix * vec4(transformed, 1.0);
 vCaneWorld = _cw.xyz;`,
@@ -641,6 +759,66 @@ diffuseColor.rgb *= 1.0 + shade;`,
 
   const tuftColour = useMemo(() => new THREE.Color('#6b8a3e'), []);
 
+  // ---- wind driver ----
+  // Gust-based, not continuous. Calm baseline is ~0.04 (barely any
+  // motion) so during quiet periods the grove holds still. Gusts
+  // come at randomised intervals; each one ramps in and out with a
+  // bell envelope so the grove visibly responds to a passing wind,
+  // then settles back. Rain adds a persistent baseline shake on top
+  // of the gust pattern so storms feel weighty.
+  //
+  // Timings (seconds):
+  //   gust active duration:  4 – 9
+  //   calm between gusts:    10 – 28
+  //
+  // These produce a wind cadence that feels like a real exterior
+  // garden rather than a fan running on a loop.
+  const windClock = useRef(0);
+  const gustActive = useRef(false);
+  const gustElapsed = useRef(0);
+  const gustDuration = useRef(0);
+  const calmRemaining = useRef(3 + Math.random() * 6); // first gust soon after load
+  const gustPeak = useRef(1.0);
+  useFrame((_, dt) => {
+    windClock.current += dt;
+    WIND_UNIFORMS.uTime.value = windClock.current;
+
+    let gustEnvelope = 0;
+    if (gustActive.current) {
+      gustElapsed.current += dt;
+      const phase = gustElapsed.current / gustDuration.current;
+      if (phase >= 1) {
+        gustActive.current = false;
+        calmRemaining.current = 10 + Math.random() * 18;
+      } else {
+        // Bell-shaped envelope: 0 → 1 → 0 over the gust duration.
+        // sin^1.4 keeps the peak fuller than a pure sin would, so
+        // the gust holds at near-max for ~30% of its window.
+        gustEnvelope = Math.pow(Math.sin(phase * Math.PI), 1.4) * gustPeak.current;
+      }
+    } else {
+      calmRemaining.current -= dt;
+      if (calmRemaining.current <= 0) {
+        gustActive.current = true;
+        gustElapsed.current = 0;
+        gustDuration.current = 4 + Math.random() * 5;
+        // Most gusts are moderate; occasionally a stronger one comes
+        // through. Keeps the grove from feeling tuned to a single
+        // amplitude.
+        gustPeak.current = 0.7 + Math.random() * 0.5;
+      }
+    }
+
+    const wIntensity = useStore.getState().weatherIntensity;
+    // Storm baseline: under rain the air is moving constantly, so we
+    // add a low persistent shake even during nominal calm windows.
+    const stormBaseline = wIntensity * 0.35;
+    // Cap total strength so even storm+gust can't fold the canes.
+    WIND_UNIFORMS.uWindStrength.value = Math.min(
+      1.4,
+      0.04 + gustEnvelope + stormBaseline,
+    );
+  });
 
   return (
     <>
@@ -660,7 +838,7 @@ diffuseColor.rgb *= 1.0 + shade;`,
           // our injected curve + taper + node-band code. The cache
           // key forces a fresh program compile per design version.
           mat.onBeforeCompile = caneBaseMat.onBeforeCompile;
-          mat.customProgramCacheKey = () => 'sand-garden-cane-v3';
+          mat.customProgramCacheKey = () => 'sand-garden-cane-v5-gust';
           mat.color = colour;
           return (
             <mesh

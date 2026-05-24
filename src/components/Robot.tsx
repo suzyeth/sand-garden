@@ -70,18 +70,36 @@ const CHARGE_RATE_PER_SEC = 3.0; // %/s while docked
 // pit-stop.
 const DOCK_SETTLE_TIME = 1.4; // s before charging starts
 const DOCK_DEPART_TIME = 1.1; // s after fully charged before leaving
-// Park slightly inside the sand from the home stone so the robot's
-// chassis (0.9m long) sits on the engawa-facing side of the dock.
-// HOME_STONE_POS is the lantern/dock stone at SE corner (6.2, -6.2).
+// Park INSIDE the garage at the home stone position. HOME_STONE_POS
+// is the dock structure at SE corner (6.2, -6.2). The garage is now
+// axis-aligned with opening facing world +Z, so the robot's parked
+// centre sits 0.25m north of the stone, chassis fully inside and
+// nose pointing toward the back wall (-Z direction).
 const DOCK_POS: [number, number] = [
-  HOME_STONE_POS[0] - 0.85,
-  HOME_STONE_POS[1] + 0.85,
+  HOME_STONE_POS[0],
+  HOME_STONE_POS[1] + 0.25,
 ];
-// Yaw the robot should hold while parked — facing the home stone.
+// Yaw the robot should hold while parked — nose pointing into the
+// back of the garage (local -Z direction in world coords with
+// GARAGE_YAW=0). atan2(0, +0.25) = 0, meaning the robot's local
+// axes match world, with local -Z (front, LED end) facing -Z (back
+// of garage). Kept as the formula so any DOCK_POS tweak stays in
+// sync automatically.
 const DOCK_YAW = Math.atan2(
   HOME_STONE_POS[0] - DOCK_POS[0],
   -(HOME_STONE_POS[1] - DOCK_POS[1]),
 );
+// Intermediate approach waypoint — sits 0.85m north of DOCK_POS,
+// just outside the garage opening on the centreline. Seek-home
+// always reaches this point first, then drives straight south into
+// the dock. Without it, a low-battery event triggered while raking
+// near the home stone made the robot approach from the side and
+// clip the garage's flank on the way in.
+const APPROACH_POS: [number, number] = [
+  DOCK_POS[0],
+  DOCK_POS[1] + 0.85,
+];
+const APPROACH_REACHED_EPS = 0.18;
 const SEEK_SPEED = 1.25; // m/s — decisive but not panicked
 const RETURN_SPEED = 1.0; // m/s leaving dock back to path
 const ARRIVAL_EPS = 0.04; // metres
@@ -184,6 +202,10 @@ export function Robot({ startPosition }: Props) {
   const dockSettleAcc = useRef(0);
   const dockDepartAcc = useRef(0);
   const dockFullyCharged = useRef(false);
+  // Two-leg approach flag — false until the robot hits APPROACH_POS,
+  // then true for the straight-in entry. Reset whenever seek-home
+  // starts.
+  const approachReached = useRef(false);
   const setRobotState = useStore((s) => s.setState);
 
   useFrame((_, dt) => {
@@ -208,19 +230,35 @@ export function Robot({ startPosition }: Props) {
       // Mode-specific movement.
       const here = group.current.position;
       if (mode.current === 'seek-home') {
-        const tx = DOCK_POS[0];
-        const tz = DOCK_POS[1];
+        // Two-leg approach: head to APPROACH_POS first (just outside
+        // the garage opening), then to DOCK_POS for the straight-in
+        // entry. The opening faces NW and DOCK_POS sits inside the
+        // garage, so a direct straight-line from any point in the
+        // garden would risk clipping a side wall — the waypoint
+        // forces a clean centre-axis approach.
+        const tx = approachReached.current ? DOCK_POS[0] : APPROACH_POS[0];
+        const tz = approachReached.current ? DOCK_POS[1] : APPROACH_POS[1];
         const dx = tx - here.x;
         const dz = tz - here.z;
         const distLeft = Math.hypot(dx, dz);
-        if (distLeft < ARRIVAL_EPS) {
-          // Settle into dock.
-          group.current.position.set(tx, ROBOT_BODY_Y, tz);
-          mode.current = 'dock';
-          dockSettleAcc.current = 0;
-          dockDepartAcc.current = 0;
-          dockFullyCharged.current = false;
-          setRobotState('DOCK');
+        const arriveEps = approachReached.current
+          ? ARRIVAL_EPS
+          : APPROACH_REACHED_EPS;
+        if (distLeft < arriveEps) {
+          if (!approachReached.current) {
+            // Hit the approach waypoint — switch target to DOCK_POS
+            // without changing mode. Position is left as-is so the
+            // next frame computes a fresh delta toward the dock.
+            approachReached.current = true;
+          } else {
+            // Settle into dock.
+            group.current.position.set(tx, ROBOT_BODY_Y, tz);
+            mode.current = 'dock';
+            dockSettleAcc.current = 0;
+            dockDepartAcc.current = 0;
+            dockFullyCharged.current = false;
+            setRobotState('DOCK');
+          }
         } else {
           // Decelerate as we approach so the arrival is not a slam-cut.
           const decel = Math.min(1, distLeft / DECEL_RADIUS);
@@ -512,6 +550,7 @@ export function Robot({ startPosition }: Props) {
         resumeTarget.current = [resumeSample.pos[0], resumeSample.pos[1]];
         resumeYaw.current = resumeSample.yaw;
         mode.current = 'seek-home';
+        approachReached.current = false;
         setRobotState('SEEK_HOME');
       }
     }
