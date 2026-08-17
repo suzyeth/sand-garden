@@ -13,3 +13,6 @@ dist
 
 # Claude Code / IDE local config
 .claude/
+
+# Screen recordings — keep out of the repo (moved to ../sand-garden-recordings/, 2026-08-17)
+*.mp4
