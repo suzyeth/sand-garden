@@ -2,6 +2,8 @@
 
 A small robot perpetually rakes wave patterns into a tiny dry garden. The rake doesn't know what it's drawing. Sand slowly forgets. Weather rolls in, dragonflies dart, fireflies come out at dusk, and the robot returns home to charge.
 
+**[Play online](https://suzyeth.github.io/sand-garden/)**
+
 Inspired by [Robin Reiter's robot lawn mower zen garden](https://x.com/robin7331/status/2055913423968346439).
 
 ## Run
@@ -11,7 +13,7 @@ npm install
 npm run dev
 ```
 
-Then open <http://localhost:5173>.
+For local development, open `http://localhost:5173`.
 
 ```bash
 npm run build    # type-check + production build
